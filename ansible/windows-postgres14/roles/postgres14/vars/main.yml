@@ -1,0 +1,21 @@
+---
+# Derived values only. Kept in vars/ (lazy Jinja, so defaults/overrides still
+# propagate) so nobody has to keep paths in sync by hand. Override behaviour in
+# defaults/main.yml or from the playbook/inventory, not here.
+
+pg14_installer: "postgresql-{{ pg14_version }}-windows-x64.exe"
+# Installer URL supplied for this instance - PG 14.24, EDB build 4.
+pg14_url: "https://get.enterprisedb.com/postgresql/{{ pg14_installer }}"
+pg14_installer_path: "{{ pg14_temp_dir }}\\{{ pg14_installer }}"
+
+pg14_bin_dir: "{{ pg14_install_dir }}\\bin"
+pg14_psql: "{{ pg14_bin_dir }}\\psql.exe"
+pg14_pg_ctl: "{{ pg14_bin_dir }}\\pg_ctl.exe"
+pg14_postgresql_conf: "{{ pg14_data_dir }}\\postgresql.conf"
+pg14_pg_hba_conf: "{{ pg14_data_dir }}\\pg_hba.conf"
+pg14_pg_version_file: "{{ pg14_data_dir }}\\PG_VERSION"
+
+pg14_pgvector_src_dir: "{{ pg14_temp_dir }}\\pgvector-{{ pg14_pgvector_version }}"
+pg14_pgvector_dll: "{{ pg14_install_dir }}\\lib\\vector.dll"
+pg14_pgvector_control: "{{ pg14_install_dir }}\\share\\extension\\vector.control"
+pg14_pgvector_zip_path: "{{ pg14_temp_dir }}\\pgvector-{{ pg14_pgvector_version }}-windows-x64.zip"

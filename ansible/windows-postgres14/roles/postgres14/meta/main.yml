@@ -1,0 +1,23 @@
+---
+galaxy_info:
+  role_name: postgres14
+  author: QASIP / ATMS platform team
+  description: >-
+    Side-by-side PostgreSQL 14 (default 14.24-4) instance with pgvector on
+    Windows, listening on port 5433. Installs next to - and never modifies -
+    the legacy PostgreSQL 10 instance on port 5432 managed by
+    ansible/windows/roles/postgres.
+  license: internal
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Windows
+      versions:
+        - all
+
+# community.windows provides win_lineinfile and win_firewall_rule; everything
+# else used here ships in ansible.windows / ansible.builtin.
+collections:
+  - ansible.windows
+  - community.windows
+
+dependencies: []

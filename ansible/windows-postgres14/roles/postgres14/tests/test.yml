@@ -1,0 +1,13 @@
+---
+# Smoke test for the role layout (real execution needs a Windows target with
+# WinRM - see ../../../README.md). Syntax-check either playbook from the repo root:
+#   ansible-playbook --syntax-check ansible/windows-postgres14/postgres14.yml \
+#     -i ansible/windows-postgres14/inventory/inventory.ini
+#   ANSIBLE_ROLES_PATH=ansible/windows-postgres14/roles ansible-playbook \
+#     --syntax-check ansible/windows-postgres14/roles/postgres14/tests/test.yml \
+#     -i ansible/windows-postgres14/roles/postgres14/tests/inventory
+- name: postgres14 role smoke test
+  hosts: windows
+  gather_facts: false
+  roles:
+    - postgres14

@@ -1,0 +1,32 @@
+---
+# =============================================================================
+# Standalone playbook for the SECOND PostgreSQL instance (14.x on port 5433,
+# with pgvector). It lives outside ansible/windows/ on purpose:
+#
+#   * ansible/windows/windows.yml and every existing role stay untouched
+#   * running this never re-runs chocolatey / nssm / openjdk / ... - it only
+#     installs and configures the new database instance
+#   * the legacy PostgreSQL 10 instance (port 5432) is only ever READ
+#     (service state + listening port) so the run can prove it changed nothing
+#
+# Run it (from the repository root), reusing the existing Windows inventory:
+#   ansible-playbook ansible/windows-postgres14/postgres14.yml \
+#     -i ansible/windows/inventory/inventory.ini
+#
+# ...or with this tree's own inventory:
+#   ansible-playbook ansible/windows-postgres14/postgres14.yml \
+#     -i ansible/windows-postgres14/inventory/inventory.ini
+#
+# Jenkins: pass the superuser password the same way the existing jobs do -
+#   -e '{"pg14_superuser": "postgres", "pg14_superuser_password": "..."}'
+# which overrides secrets.yml below.
+# =============================================================================
+- name: Install PostgreSQL 14 (port 5433) with pgvector alongside PostgreSQL 10
+  hosts: windows
+  gather_facts: false
+
+  vars_files:
+    - secrets.yml
+
+  roles:
+    - postgres14
