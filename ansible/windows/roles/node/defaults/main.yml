@@ -1,0 +1,7 @@
+---
+# defaults file for roles/node
+node_version: "v10.15.1"
+node_msi: "node-{{ node_version }}-x64.msi"
+node_url: "https://nodejs.org/dist/{{ node_version }}/{{ node_msi }}"
+temp_dir: "D:\\temp"
+node_install_dir: "C:\\Program Files\\nodejs"

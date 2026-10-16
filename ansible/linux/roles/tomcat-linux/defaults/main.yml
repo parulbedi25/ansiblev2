@@ -1,0 +1,9 @@
+---
+# defaults file for roles/tomcat-linux
+tomcat_version: "9.0.115"
+tomcat_version_number: "9"
+java_version: "8"
+tomcat_archive: "apache-tomcat-{{ tomcat_version }}.tar.gz"
+tomcat_url: "https://archive.apache.org/dist/tomcat/tomcat-{{ tomcat_version_number }}/v{{ tomcat_version }}/bin/{{ tomcat_archive }}"
+tomcat_install_dir: "/opt/apache-tomcat-{{ tomcat_version }}"
+tomcat_home: "/opt/tomcat"

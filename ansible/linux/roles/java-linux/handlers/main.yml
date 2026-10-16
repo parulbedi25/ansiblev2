@@ -1,0 +1,5 @@
+---
+# handlers file for roles/java-linux
+- name: update environment
+  command: /bin/true
+  # Placeholder handler for environment updates

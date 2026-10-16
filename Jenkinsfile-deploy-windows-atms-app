@@ -1,0 +1,264 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: 'copper-dev-10.10.12.78',
+            description: 'Jenkins project agent label where this pipeline will run (format: project-env-ip, eg: copper-dev-10.10.3.150)'
+        )
+
+        string(
+            name: 'BUILD_VERSION',
+            defaultValue: '',
+            description: 'Build version to deploy (example: 17-02-2026-v1.0.0-175)'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['D', 'E', 'F'],
+            description: 'Drive where WAR file is deployed'
+        )
+    }
+
+    environment {
+
+        PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
+
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        TOMCAT_HOME          = "${params.DEPLOY_DRIVE}:\\QASIP\\Apps\\tomcat"
+        TOMCAT_WEBAPPS       = "${params.DEPLOY_DRIVE}:\\QASIP\\Apps\\tomcat\\webapps"
+
+        NOTIFICATION_SCRIPT  = "${params.DEPLOY_DRIVE}:\\Scripts\\sendDeploymentEmail.js"
+        ANSIBLE_OS           = 'windows'
+        SERVICE_NAME         = "Tomcat9"
+    }
+
+    stages {
+
+        // Stop Tomcat
+        stage('Stop Tomcat') {
+            steps {
+                bat '''
+                    @echo off
+                    echo Stopping Tomcat Service If Running
+
+                    net stop "%SERVICE_NAME%" 2>nul
+
+                    ping 127.0.0.1 -n 8 > nul
+
+                    echo Tomcat stopped
+                '''
+            }
+        }
+
+
+        // Clean Existing Deployment
+        stage('Clean Old Deployment') {
+            steps {
+                bat '''
+                    @echo off
+                    echo Cleaning Existing Deployment
+
+
+                    cd /d "%TOMCAT_WEBAPPS%"
+
+                    if exist ROOT (
+                        echo Removing ROOT directory...
+                        rmdir /S /Q ROOT
+                    )
+
+                    if exist ROOT.war (
+                        echo Removing ROOT.war...
+                        del /F /Q ROOT.war
+                    )
+
+                    echo Cleanup completed
+                '''
+            }
+        }
+
+        // Download WAR From Nexus
+        stage('Download WAR From Nexus') {
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        @echo off
+                        echo ========================================
+                        echo Downloading ROOT.war From Nexus
+                        echo ========================================
+
+                        cd /d "%TOMCAT_WEBAPPS%"
+
+                        curl.exe -f ^
+                          -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                          -o ROOT.war ^
+                          "%NEXUS_URL%/repository/%NEXUS_REPO%/%PROJECT_NAME%/windows/${params.BUILD_VERSION}/atms-app/ROOT.war"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download WAR file
+                            exit /b 1
+                        )
+
+                        echo WAR downloaded successfully
+                        dir ROOT.war
+                    """
+                }
+            }
+        }
+
+
+        // Start Tomcat + Verify Deployment
+        stage('Start Tomcat and Verify Deployment') {
+            steps {
+                bat '''
+                    @echo off
+                    echo ========================================
+                    echo Starting Tomcat
+                    echo ========================================
+
+                    net start "%SERVICE_NAME%"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to start Tomcat
+                        exit /b 1
+                    )
+
+                    echo Waiting for WAR extraction...
+                    ping 127.0.0.1 -n 30 > nul
+
+                    echo ========================================
+                    echo Verifying deployment
+                    echo ========================================
+
+                    if not exist "%TOMCAT_WEBAPPS%\\ROOT" (
+                        echo ERROR: ROOT directory not created
+                        exit /b 1
+                    )
+
+                    echo ROOT directory created successfully
+
+                    if exist "%TOMCAT_WEBAPPS%\\ROOT\\WEB-INF" (
+                        echo WEB-INF directory found
+                    ) else (
+                        echo WARNING: WEB-INF directory not found
+                    )
+
+                    echo Listing ROOT contents...
+                    dir "%TOMCAT_WEBAPPS%\\ROOT"
+
+                    echo.
+                    echo ========================================
+                    echo WAR Deployment Successful
+                    echo ========================================
+                    echo URL: http://localhost:8080
+                    echo.
+                '''
+            }
+        }
+
+    }
+
+    post {
+
+        success {
+
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+
+                script {
+
+                    def executionTime =
+                        currentBuild.durationString
+                            .replace(' and counting', '')
+
+                    bat """
+                        @echo off
+
+                        node "%NOTIFICATION_SCRIPT%" ^
+                        --smtpServer=%SMTP_SERVER% ^
+                        --smtpUser=%SMTP_USER% ^
+                        --smtpPassword=%SMTP_PASSWORD% ^
+                        --smtpPort=%SMTP_PORT% ^
+                        --senderName="DevOps QASIP" ^
+                        --senderEmail="copper@qasource.com" ^
+                        --receiverEmail="${params.NOTIFICATION_EMAILS}" ^
+                        --targetMachine="${params.PROJECT_TARGET_MACHINE}" ^
+                        --buildVersion="${params.BUILD_VERSION}" ^
+                        --osType=%ANSIBLE_OS% ^
+                        --executionTime="${executionTime}" ^
+                        --status="success" ^
+                        --runUrl="${env.BUILD_URL}"
+                    """
+                }
+            }
+        }
+
+        failure {
+
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+
+                script {
+
+                    def executionTime =
+                        currentBuild.durationString
+                            .replace(' and counting', '')
+
+                    bat """
+                        @echo off
+
+                        node "%NOTIFICATION_SCRIPT%" ^
+                        --smtpServer=%SMTP_SERVER% ^
+                        --smtpUser=%SMTP_USER% ^
+                        --smtpPassword=%SMTP_PASSWORD% ^
+                        --smtpPort=%SMTP_PORT% ^
+                        --senderName="DevOps QASIP" ^
+                        --senderEmail="copper@qasource.com" ^
+                        --receiverEmail="${params.NOTIFICATION_EMAILS}" ^
+                        --targetMachine="${params.PROJECT_TARGET_MACHINE}" ^
+                        --buildVersion="${params.BUILD_VERSION}" ^
+                        --osType=%ANSIBLE_OS% ^
+                        --executionTime="${executionTime}" ^
+                        --status="failure" ^
+                        --runUrl="${env.BUILD_URL}"
+                    """
+                }
+            }
+        }
+    }
+}

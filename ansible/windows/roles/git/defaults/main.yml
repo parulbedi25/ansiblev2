@@ -1,0 +1,7 @@
+---
+# defaults file for roles/git
+git_version: "2.43.0"
+git_installer: "Git-{{ git_version }}-64-bit.exe"
+git_url: "https://github.com/git-for-windows/git/releases/download/v{{ git_version }}.windows.1/{{ git_installer }}"
+temp_dir: "D:\\temp"
+git_install_dir: "C:\\Program Files\\Git"

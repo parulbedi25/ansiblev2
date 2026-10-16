@@ -1,0 +1,238 @@
+---
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+- name: Ensure PostgreSQL install and data directories exist
+  win_file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - "{{ pg_install_dir }}"
+    - "{{ pg_data_dir }}"
+- name: Check if PostgreSQL service exists
+  win_service:
+    name: "{{ pg_service_name }}"
+  register: pg_service_check
+  ignore_errors: yes
+- name: Resolve PostgreSQL psql executable path
+  win_shell: |
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $configured = "{{ pg_install_dir }}\bin\psql.exe"
+    if ($configured) {
+      $candidates.Add($configured)
+    }
+
+    $service = Get-CimInstance Win32_Service -Filter "Name='{{ pg_service_name }}'" -ErrorAction SilentlyContinue
+    if ($service -and $service.PathName) {
+      $serviceExe = [regex]::Match($service.PathName, '^"([^"]+)"|^(\S+)').Groups |
+        Where-Object { $_.Value } |
+        Select-Object -First 1 -ExpandProperty Value
+      if ($serviceExe) {
+        $serviceExe = $serviceExe.Trim('"')
+        $serviceDir = Split-Path -Path $serviceExe -Parent
+        if ($serviceDir) {
+          $candidates.Add((Join-Path $serviceDir 'psql.exe'))
+        }
+      }
+    }
+
+    $searchRoots = @(
+      'D:\QASIP\Apps',
+      'C:\Program Files\PostgreSQL',
+      'D:\Program Files\PostgreSQL'
+    ) | Select-Object -Unique
+
+    foreach ($root in $searchRoots) {
+      if (Test-Path $root) {
+        Get-ChildItem -Path $root -Filter 'psql.exe' -File -Recurse -ErrorAction SilentlyContinue |
+          ForEach-Object { $candidates.Add($_.FullName) }
+      }
+    }
+
+    $resolved = $candidates |
+      Where-Object { $_ -and (Test-Path $_) } |
+      Select-Object -Unique -First 1
+
+    if ($resolved) {
+      Write-Output $resolved
+    }
+  register: psql_path_lookup
+  changed_when: false
+- name: Set PostgreSQL client path
+  set_fact:
+    pg_psql_path: "{{ (psql_path_lookup.stdout | trim) if (psql_path_lookup.stdout | trim) else (pg_install_dir ~ '\\bin\\psql.exe') }}"
+- name: Set PostgreSQL install needed
+  set_fact:
+    pg_install_needed: "{{ not (pg_service_check.exists | default(false)) or not ((psql_path_lookup.stdout | trim) | length > 0) }}"
+- name: Download PostgreSQL {{ pg_version }} installer
+  win_get_url:
+    url: "{{ pg_url }}"
+    dest: "{{ temp_dir }}\\{{ pg_installer }}"
+  when: pg_install_needed | bool
+- name: Install PostgreSQL {{ pg_version }} silently
+  win_package:
+    path: "{{ temp_dir }}\\{{ pg_installer }}"
+    arguments: >
+      --mode unattended
+      --unattendedmodeui none
+      --superaccount "{{ pg_superuser }}"
+      --superpassword "{{ pg_superuser_password }}"
+      --serverport {{ pg_port }}
+      --servicename "{{ pg_service_name }}"
+      --prefix "{{ pg_install_dir }}"
+      --datadir "{{ pg_data_dir }}"
+      --enable-components server,commandlinetools,pgAdmin
+    state: present
+  when: pg_install_needed | bool
+- meta: flush_handlers
+- name: Resolve PostgreSQL psql executable path after install
+  win_shell: |
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $configured = "{{ pg_install_dir }}\bin\psql.exe"
+    if ($configured) {
+      $candidates.Add($configured)
+    }
+
+    $service = Get-CimInstance Win32_Service -Filter "Name='{{ pg_service_name }}'" -ErrorAction SilentlyContinue
+    if ($service -and $service.PathName) {
+      $serviceExe = [regex]::Match($service.PathName, '^"([^"]+)"|^(\S+)').Groups |
+        Where-Object { $_.Value } |
+        Select-Object -First 1 -ExpandProperty Value
+      if ($serviceExe) {
+        $serviceExe = $serviceExe.Trim('"')
+        $serviceDir = Split-Path -Path $serviceExe -Parent
+        if ($serviceDir) {
+          $candidates.Add((Join-Path $serviceDir 'psql.exe'))
+        }
+      }
+    }
+
+    $searchRoots = @(
+      'D:\QASIP\Apps',
+      'C:\Program Files\PostgreSQL',
+      'D:\Program Files\PostgreSQL'
+    ) | Select-Object -Unique
+
+    foreach ($root in $searchRoots) {
+      if (Test-Path $root) {
+        Get-ChildItem -Path $root -Filter 'psql.exe' -File -Recurse -ErrorAction SilentlyContinue |
+          ForEach-Object { $candidates.Add($_.FullName) }
+      }
+    }
+
+    $resolved = $candidates |
+      Where-Object { $_ -and (Test-Path $_) } |
+      Select-Object -Unique -First 1
+
+    if ($resolved) {
+      Write-Output $resolved
+    }
+  register: psql_path_lookup_post_install
+  changed_when: false
+  when: pg_install_needed | bool
+- name: Set PostgreSQL client path after install
+  set_fact:
+    pg_psql_path: "{{ (psql_path_lookup_post_install.stdout | trim) if (psql_path_lookup_post_install.stdout | trim) else (pg_install_dir ~ '\\bin\\psql.exe') }}"
+  when: pg_install_needed | bool
+- name: Verify PostgreSQL service status
+  win_service:
+    name: "{{ pg_service_name }}"
+  register: pg_service_status
+- name: Verify PostgreSQL client exists
+  win_stat:
+    path: "{{ pg_psql_path }}"
+  register: pg_psql_stat
+- name: Fail if PostgreSQL client is missing
+  assert:
+    that:
+      - pg_psql_stat.stat.exists | default(false)
+    fail_msg: >
+      PostgreSQL client executable not found at '{{ pg_psql_path }}'.
+      Check the installed PostgreSQL location or override pg_install_dir/pg_psql_path.
+
+- name: Set PostgreSQL bin directory from resolved psql path
+  set_fact:
+    pg_psql_bin_dir: "{{ pg_psql_path | regex_replace('\\\\psql\\.exe$', '') }}"
+- name: Set PostgreSQL pg_dumpall path from resolved bin directory
+  set_fact:
+    pg_dumpall_path: "{{ pg_psql_bin_dir }}\\pg_dumpall.exe"
+- name: Ensure PostgreSQL bin directory is in system PATH
+  win_path:
+    elements:
+      - "{{ pg_psql_bin_dir }}"
+    scope: machine
+    state: present
+- name: Reset connection to refresh PATH
+  meta: reset_connection
+- name: Verify pg_dumpall executable exists
+  win_stat:
+    path: "{{ pg_dumpall_path }}"
+  register: pg_dumpall_stat
+- name: Fail if PostgreSQL pg_dumpall is missing
+  assert:
+    that:
+      - pg_dumpall_stat.stat.exists | default(false)
+    fail_msg: >
+      PostgreSQL pg_dumpall executable not found at '{{ pg_dumpall_path }}'.
+      Ensure PostgreSQL command line tools are installed.
+- name: Verify psql is available in PATH
+  win_shell: |
+    if (Get-Command psql.exe -ErrorAction SilentlyContinue) {
+      exit 0
+    }
+    exit 1
+  changed_when: false
+- name: Verify pg_dumpall is available in PATH
+  win_shell: |
+    if (Get-Command pg_dumpall.exe -ErrorAction SilentlyContinue) {
+      exit 0
+    }
+    exit 1
+  changed_when: false
+  
+- name: Create PostgreSQL Database {{ pg_db_name }}
+  win_shell: |
+    $exists = & "{{ pg_psql_path }}" `
+      -U {{ pg_superuser }} `
+      -p {{ pg_port }} `
+      -d postgres `
+      -tAc "SELECT 1 FROM pg_database WHERE datname='{{ pg_db_name }}'"
+    if (-not $exists) {
+      & "{{ pg_psql_path }}" `
+        -U {{ pg_superuser }} `
+        -p {{ pg_port }} `
+        -d postgres `
+        -c "CREATE DATABASE {{ pg_db_name }};"
+    }
+  environment:
+    PGPASSWORD: "{{ pg_superuser_password }}"
+  changed_when: false
+- name: Create PostgreSQL required roles
+  win_shell: |
+    $roles = ConvertFrom-Json '{{ pg_roles | to_json }}'
+    foreach ($role in $roles) {
+      $exists = & "{{ pg_psql_path }}" `
+        -U {{ pg_superuser }} `
+        -p {{ pg_port }} `
+        -d postgres `
+        -tAc "SELECT 1 FROM pg_roles WHERE rolname='${role}'"
+      if (-not $exists) {
+        & "{{ pg_psql_path }}" `
+          -U {{ pg_superuser }} `
+          -p {{ pg_port }} `
+          -d postgres `
+          -c "CREATE ROLE ${role};"
+      }
+    }
+  environment:
+    PGPASSWORD: "{{ pg_superuser_password }}"
+  changed_when: false
+- name: Fail if PostgreSQL service is not running
+  assert:
+    that:
+      - pg_service_status.state == "running"
+    fail_msg: >
+      PostgreSQL service '{{ pg_service_name }}' is not running.
+      Current state: {{ pg_service_status.state | default('unknown') }}

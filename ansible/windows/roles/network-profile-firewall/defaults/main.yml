@@ -1,0 +1,14 @@
+---
+app_inbound_ports:
+  - 6003
+  - 4001
+  - 8080
+firewall_rule_name_prefix: "qajarvis"
+firewall_rule_profiles:
+  - Domain
+  - Private
+  - Public
+firewall_rule_protocol: tcp
+firewall_rule_direction: in
+firewall_rule_action: allow
+firewall_rule_enabled: yes

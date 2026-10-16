@@ -1,0 +1,99 @@
+---
+# tasks file for roles/chocolatey
+- name: Ensure Chocolatey is installed
+  win_chocolatey:
+    name: chocolatey
+    state: present
+  notify: Refresh Chocolatey PATH
+
+- name: Force PATH update now
+  meta: flush_handlers
+
+- name: Verify Chocolatey installation
+  win_command: choco --version
+  register: choco_version
+  changed_when: false
+  failed_when: false
+
+- name: Fail if Chocolatey is not installed
+  fail:
+    msg: >
+      Chocolatey is not installed or not available in PATH.
+      Please install Chocolatey before continuing.
+  when: choco_version.rc != 0
+
+- name: Check Chocolatey package availability
+  win_shell: |
+    $name = "{{ item.name }}"
+    $result = choco search $name --exact --limit-output
+    if ($LASTEXITCODE -ne 0) {
+      exit $LASTEXITCODE
+    }
+
+    if ($result -match "^$name\|") {
+      Write-Output "available=1"
+    } else {
+      Write-Output "available=0"
+    }
+  register: choco_package_checks
+  changed_when: false
+  loop: "{{ choco_windows_packages }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Fail when required Chocolatey package is unavailable
+  fail:
+    msg: >
+      Required Chocolatey package '{{ item.item.name }}' is not available from configured sources.
+      Check repository/source configuration and package name.
+  when:
+    - item.item.required | bool
+    - "'available=1' not in item.stdout"
+  loop: "{{ choco_package_checks.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Install available Chocolatey packages
+  win_chocolatey:
+    name: "{{ item.item.name }}"
+    state: present
+  when: "'available=1' in item.stdout"
+  loop: "{{ choco_package_checks.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Report unavailable optional Chocolatey packages
+  debug:
+    msg: "Optional package '{{ item.item.name }}' is not available in Chocolatey source and was skipped."
+  when:
+    - not (item.item.required | bool)
+    - "'available=1' not in item.stdout"
+  loop: "{{ choco_package_checks.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Ensure PuTTY install directory is in system PATH for pscp.exe
+  win_path:
+    elements:
+      - "{{ putty_bin_path }}"
+    scope: machine
+    state: present
+
+- name: Reset connection to refresh PATH
+  meta: reset_connection
+
+- name: Verify pscp.exe is available in PATH
+  win_shell: |
+    if (Get-Command pscp.exe -ErrorAction SilentlyContinue) {
+      exit 0
+    }
+    exit 1
+  changed_when: false
+
+- name: Verify jq is available in PATH
+  win_shell: |
+    if (Get-Command jq.exe -ErrorAction SilentlyContinue) {
+      exit 0
+    }
+    exit 1
+  changed_when: false

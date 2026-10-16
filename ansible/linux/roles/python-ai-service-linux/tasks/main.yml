@@ -1,0 +1,49 @@
+---
+# tasks file for python-ai-service-linux
+- name: Ensure Python application directory exists
+  file:
+    path: "{{ python_app_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Ensure Python log directory exists
+  file:
+    path: "{{ python_log_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Check if service already exists
+  command: systemctl status {{ service_name }}
+  register: service_check
+  changed_when: false
+  failed_when: false
+
+- name: Stop existing service if running
+  systemd:
+    name: "{{ service_name }}"
+    state: stopped
+  when: service_check.rc == 0
+  failed_when: false
+
+- name: Deploy systemd service file for Python AI service
+  template:
+    src: python-ai-service.service.j2
+    dest: "/etc/systemd/system/{{ service_name }}.service"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+
+- name: Configure service startup type (enabled but don't start yet)
+  systemd:
+    name: "{{ service_name }}"
+    enabled: yes
+    state: stopped
+
+- name: Display service creation status
+  debug:
+    msg: "{{ service_name }} created successfully (stopped). Will be started by Jenkins deployment."

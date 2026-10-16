@@ -1,0 +1,33 @@
+---
+# tasks file for roles/openjdk
+- name: Ensure Chocolatey is installed
+  win_chocolatey:
+    name: chocolatey
+    state: present
+
+- name: Install Gradle {{ gradle_version }} using Chocolatey
+  win_chocolatey:
+    name: gradle
+    version: "{{ gradle_version }}"
+    state: present
+    force: yes
+
+- name: Set GRADLE_HOME environment
+  win_environment:
+    name: GRADLE_HOME
+    value: "{{ gradle_home }}"
+    level: machine
+    state: present
+
+- name: Verify Gradle installation
+  win_command: gradle.bat -v
+  register: gradle_version_output
+  changed_when: false
+  failed_when: false
+
+- name: Fail if Gradle is not installed
+  fail:
+    msg: >
+      Gradle {{ gradle_version }} is not installed or not available in PATH.
+      Please verify Chocolatey installation.
+  when: gradle_version_output.rc != 0

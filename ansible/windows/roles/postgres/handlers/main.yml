@@ -1,0 +1,7 @@
+---
+# handlers file for roles/postgres
+- name: Ensure PostgreSQL service is running
+  win_service:
+    name: "{{ pg_service_name }}"
+    state: started
+    start_mode: auto

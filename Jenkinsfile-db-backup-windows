@@ -1,0 +1,356 @@
+pipeline {
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    environment {
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+        SCRIPT_ROOT          = "${WORKSPACE}\\db-scripts"
+        DB_SCRIPT_DIR        = "${WORKSPACE}\\db-scripts\\db"
+        NOTIFY_SCRIPT_DIR    = "${WORKSPACE}\\db-scripts\\script"
+    }
+
+    parameters {
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: 'copper-dev-10.10.3.158',
+            description: 'Jenkins Windows node label where backup should run (example: copper-dev-10.10.3.158).'
+        )
+
+        string(
+            name: 'PG_USER',
+            defaultValue: 'postgres',
+            description: 'PostgreSQL user used by pg_dumpall.'
+        )
+        password(
+            name: 'PG_PASSWORD',
+            defaultValue: 'Welcom3!',
+            description: 'PostgreSQL password.'
+        )
+
+        string(
+            name: 'COUCH_USER',
+            defaultValue: 'admin',
+            description: 'CouchDB admin user.'
+        )
+        password(
+            name: 'COUCH_PASSWORD',
+            defaultValue: 'Welcom3!',
+            description: 'CouchDB admin password.'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses for backup notifications.'
+        )
+
+    }
+
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    def missing = []
+
+                    if (!params.PROJECT_TARGET_MACHINE?.trim()) missing << 'PROJECT_TARGET_MACHINE'
+                    if (!params.NOTIFICATION_EMAILS?.trim()) missing << 'NOTIFICATION_EMAILS'
+
+                    if (missing) {
+                        error """
+BUILD FAILED
+Missing required parameters:
+${missing.join('\n')}
+"""
+                    }
+
+                    def targetMachine = params.PROJECT_TARGET_MACHINE.trim().toLowerCase()
+                    def projectName = targetMachine.tokenize('-')[0]
+                    if (!projectName) {
+                        error "Could not derive project name from PROJECT_TARGET_MACHINE '${targetMachine}'."
+                    }
+
+                    def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+                    def emailList = params.NOTIFICATION_EMAILS
+                        .split(',')
+                        .collect { it.trim().toLowerCase() }
+                        .findAll { it }
+                    def invalidEmails = emailList.findAll { !(it ==~ emailRegex) }
+                    if (invalidEmails) {
+                        error "Invalid NOTIFICATION_EMAILS entries: ${invalidEmails.join(', ')}"
+                    }
+
+                    env.PROJECT_NAME = projectName
+                    env.NOTIFY_EMAILS = emailList.join(',')
+                    env.SCP_HOST = '10.10.7.161'
+                    env.SCP_USER = 'qasip'
+                    env.SCP_PASSWORD = 'Bebo@123'
+                    env.SCP_HOST_KEY = 'ssh-ed25519 255 SHA256:gdlcbTMsdipEi0TSq7FDQRbBZYKxdpK3c40tLy3Wnj0'
+                    env.PG_PORT = '5432'
+                    env.COUCH_HOST = 'localhost'
+                    env.COUCH_PORT = '5984'
+                    env.REMOTE_BACKUP_ROOT = "E:/DB/backup/${env.PROJECT_NAME}"
+                    env.BACKUP_TIMESTAMP = 'N/A'
+                    env.BACKUP_LOCAL_FOLDER = 'N/A'
+                    env.BACKUP_REMOTE_FOLDER = 'N/A'
+                    echo "Resolved project name: ${env.PROJECT_NAME}"
+                    echo "Resolved SCP host: ${env.SCP_HOST}"
+                    echo "Resolved remote backup root: ${env.REMOTE_BACKUP_ROOT}"
+                }
+                bat '''
+                    @echo off
+                    setlocal
+                    if "%PG_PASSWORD%"=="" (
+                        echo ERROR: PG_PASSWORD is required.
+                        exit /b 1
+                    )
+                    if "%COUCH_PASSWORD%"=="" (
+                        echo ERROR: COUCH_PASSWORD is required.
+                        exit /b 1
+                    )
+                '''
+            }
+        }
+
+        stage('Download DB Scripts from Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    bat '''
+                        @echo off
+                        setlocal
+                        echo ========================================
+                        echo Downloading DB and notification scripts from Nexus
+                        echo ========================================
+
+                        if not exist "%SCRIPT_ROOT%" mkdir "%SCRIPT_ROOT%"
+
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$headers=@{Authorization='Basic '+[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%'))};$targetRoot='%SCRIPT_ROOT%';if(Test-Path $targetRoot){Get-ChildItem -Path $targetRoot -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue};$token=$null;$assets=@();do{$uri='%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%';if($token){$uri+='&continuationToken='+$token};$r=Invoke-RestMethod -Uri $uri -Headers $headers;foreach($i in $r.items){foreach($a in $i.assets){$p=($a.path|Out-String).Trim();$u=($a.downloadUrl|Out-String).Trim();if((($p -like 'common/db/*') -or ($p -like '/common/db/*') -or ($p -like 'common/script/*') -or ($p -like '/common/script/*') -or ($u -match '/common/(db|script)/')) -and ($u -match '\\.(ps1|js|json)$')){$assets+=$a}}};$token=$r.continuationToken}while($token);if($assets.Count -eq 0){throw 'No DB/script files found in Nexus common path'};foreach($a in $assets){$p=($a.path|Out-String).Trim();$rel=if($p){$p -replace '^/?common/',''}else{(($a.downloadUrl -split '/repository/[^/]+/')[1] -replace '^/?common/','')};$out=Join-Path $targetRoot ($rel -replace '/','\\');$dir=Split-Path $out -Parent;if(-not(Test-Path $dir)){New-Item -ItemType Directory -Path $dir -Force | Out-Null};Invoke-WebRequest -Uri $a.downloadUrl -Headers $headers -OutFile $out -UseBasicParsing;Write-Host('Downloaded: '+$rel)};Write-Host 'Nexus script download complete.'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download DB scripts from Nexus
+                            exit /b 1
+                        )
+
+                        if not exist "%DB_SCRIPT_DIR%\\Backup_Transfer_Script.ps1" (
+                            echo ERROR: Backup_Transfer_Script.ps1 not found in %DB_SCRIPT_DIR%
+                            exit /b 1
+                        )
+
+                        if not exist "%NOTIFY_SCRIPT_DIR%\\sendDbPipelineEmail.js" (
+                            echo ERROR: sendDbPipelineEmail.js not found in %NOTIFY_SCRIPT_DIR%
+                            exit /b 1
+                        )
+                    '''
+                }
+            }
+        }
+
+        stage('Install Notification Dependencies') {
+            steps {
+                bat '''
+                    @echo off
+                    setlocal
+                    cd /d "%NOTIFY_SCRIPT_DIR%"
+                    if not exist "node_modules\\nodemailer" (
+                        call npm install --no-audit --no-fund
+                    )
+                '''
+            }
+        }
+
+        stage('Verify Script and Tools') {
+            steps {
+                bat '''
+                    @echo off
+                    setlocal
+
+            set "PG_BIN=D:\\QASIP\\Apps\\postgres\\bin"
+            set PATH=%PG_BIN%;%PATH%
+
+            echo Running as:
+            whoami
+
+            echo PATH:
+            echo %PATH%
+
+            where pg_dumpall
+
+                    if not exist "%DB_SCRIPT_DIR%\\Backup_Transfer_Script.ps1" (
+                        echo ERROR: Backup script not found at %DB_SCRIPT_DIR%\\Backup_Transfer_Script.ps1
+                        exit /b 1
+                    )
+
+                    where pg_dumpall >nul 2>&1
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: pg_dumpall is not available in PATH
+                        exit /b 1
+                    )
+
+                    where pscp >nul 2>&1
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: pscp is not available in PATH
+                        exit /b 1
+                    )
+
+                    where plink >nul 2>&1
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: plink is not available in PATH
+                        exit /b 1
+                    )
+
+                    echo Script and tool prechecks passed.
+                '''
+            }
+        }
+
+        stage('Run DB Backup and Transfer') {
+            steps {
+                script {
+                    def backupOutput = bat(
+                        returnStdout: true,
+                        script: '''
+                            @echo off
+                            setlocal
+
+                            set "PG_BIN=D:\\QASIP\\Apps\\postgres\\bin"
+                            set "PATH=%PG_BIN%;%PATH%"
+
+                            echo ========================================
+                            echo Running Backup_Transfer_Script.ps1
+                            echo ========================================
+
+                            powershell -NoProfile -ExecutionPolicy Bypass -File "%DB_SCRIPT_DIR%\\Backup_Transfer_Script.ps1" ^
+                            -PgUser "%PG_USER%" ^
+                            -PgPort %PG_PORT% ^
+                            -PgPassword "%PG_PASSWORD%" ^
+                            -CouchUser "%COUCH_USER%" ^
+                            -CouchPassword "%COUCH_PASSWORD%" ^
+                            -CouchHost "%COUCH_HOST%" ^
+                            -CouchPort %COUCH_PORT% ^
+                            -SCPUser "%SCP_USER%" ^
+                            -SCPHost "%SCP_HOST%" ^
+                            -SCPPassword "%SCP_PASSWORD%" ^
+                            -RemoteBackupRoot "%REMOTE_BACKUP_ROOT%" ^
+                            -HostKey "%SCP_HOST_KEY%" ^
+                            -BuildNumber "%BUILD_NUMBER%"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Backup transfer script execution failed
+                                exit /b 1
+                            )
+                        '''
+                    ).trim()
+
+                    echo backupOutput
+                    def parsedTs = null
+                    def tsMatch = (backupOutput =~ /BACKUP_TIMESTAMP=(\\d{2}-\\d{2}-\\d{4}-\\d{2}-build\\d+)/)
+                    if (tsMatch.find()) {
+                        parsedTs = tsMatch.group(1)
+                    } else {
+                        tsMatch = (backupOutput =~ /(\\d{2}-\\d{2}-\\d{4}-\\d{6})/)
+                        if (tsMatch.find()) {
+                            parsedTs = tsMatch.group(1)
+                        } else {
+                            tsMatch = (backupOutput =~ /(\\d{8}_\\d{6})/)
+                            if (tsMatch.find()) {
+                                parsedTs = tsMatch.group(1)
+                            }
+                        }
+                    }
+                    if (parsedTs) {
+                        env.BACKUP_TIMESTAMP = parsedTs
+                        env.BACKUP_LOCAL_FOLDER = "D:/QASIP/Backup/${parsedTs}"
+                        env.BACKUP_REMOTE_FOLDER = "${env.REMOTE_BACKUP_ROOT}/${parsedTs}"
+                    }
+                    echo "Resolved backup timestamp: ${env.BACKUP_TIMESTAMP}"
+                    echo "Resolved local backup folder: ${env.BACKUP_LOCAL_FOLDER}"
+                    echo "Resolved remote backup folder: ${env.BACKUP_REMOTE_FOLDER}"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    def executionTime = currentBuild.durationString.replace(' and counting', '')
+                    def mailBuildNumber = (env.BACKUP_TIMESTAMP && env.BACKUP_TIMESTAMP != 'N/A') ? env.BACKUP_TIMESTAMP : "${new Date().format('dd-MM-yyyy-HH', TimeZone.getTimeZone('Asia/Kolkata'))}-build${env.BUILD_NUMBER}"
+                    bat """
+                        @echo off
+                        setlocal
+                        node "%NOTIFY_SCRIPT_DIR%\\sendDbPipelineEmail.js" ^
+                        --smtpServer="%SMTP_SERVER%" ^
+                        --smtpUser="%SMTP_USER%" ^
+                        --smtpPassword="%SMTP_PASSWORD%" ^
+                        --smtpPort="%SMTP_PORT%" ^
+                        --senderName="DevOps QASIP" ^
+                        --senderEmail="copper@qasource.com" ^
+                        --receiverEmail="${env.NOTIFY_EMAILS}" ^
+                        --pipelineType="backup" ^
+                        --projectTargetMachine="${params.PROJECT_TARGET_MACHINE}" ^
+                        --projectName="${env.PROJECT_NAME}" ^
+                        --status="success" ^
+                        --executionTime="${executionTime}" ^
+                        --buildNumber="${mailBuildNumber}"
+                    """
+                }
+            }
+            echo "Backup pipeline completed successfully."
+        }
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    def executionTime = currentBuild.durationString.replace(' and counting', '')
+                    def mailBuildNumber = (env.BACKUP_TIMESTAMP && env.BACKUP_TIMESTAMP != 'N/A') ? env.BACKUP_TIMESTAMP : "${new Date().format('dd-MM-yyyy-HH', TimeZone.getTimeZone('Asia/Kolkata'))}-build${env.BUILD_NUMBER}"
+                    int notifyRc = bat(returnStatus: true, script: """
+                        @echo off
+                        setlocal
+                        if not exist "%NOTIFY_SCRIPT_DIR%\\sendDbPipelineEmail.js" (
+                            echo WARN: Notification script missing at %NOTIFY_SCRIPT_DIR%\\sendDbPipelineEmail.js. Skipping email.
+                            exit /b 0
+                        )
+                        node "%NOTIFY_SCRIPT_DIR%\\sendDbPipelineEmail.js" ^
+                        --smtpServer="%SMTP_SERVER%" ^
+                        --smtpUser="%SMTP_USER%" ^
+                        --smtpPassword="%SMTP_PASSWORD%" ^
+                        --smtpPort="%SMTP_PORT%" ^
+                        --senderName="DevOps QASIP" ^
+                        --senderEmail="copper@qasource.com" ^
+                        --receiverEmail="${env.NOTIFY_EMAILS}" ^
+                        --pipelineType="backup" ^
+                        --projectTargetMachine="${params.PROJECT_TARGET_MACHINE}" ^
+                        --projectName="${env.PROJECT_NAME}" ^
+                        --status="failure" ^
+                        --executionTime="${executionTime}" ^
+                        --buildNumber="${mailBuildNumber}"
+                    """)
+                    if (notifyRc != 0) {
+                        echo "WARN: Failure notification email step returned exit code ${notifyRc}. Continuing."
+                    }
+                }
+            }
+            echo "Backup pipeline failed. Check stage logs for exact failure point."
+        }
+    }
+}

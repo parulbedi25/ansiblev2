@@ -1,0 +1,151 @@
+pipeline {
+
+    agent {
+        label 'test-agent'
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    stages {
+
+stage('Validate Parameters') {
+
+    steps {
+
+        script {
+
+            echo "COUCHDB_API_HOST = '${params.COUCHDB_API_HOST}'"
+            echo "COUCHDB_API_PORT = '${params.COUCHDB_API_PORT}'"
+            echo "DATABASE         = '${params.DATABASE}'"
+            echo "BACKUP_MODE      = '${params.BACKUP_MODE}'"
+            echo "DOCUMENT_TYPE    = '${params.DOCUMENT_TYPE}'"
+
+            if (!params.COUCHDB_API_HOST?.trim()) {
+                error("COUCHDB_API_HOST is required.")
+            }
+
+            if (!params.COUCHDB_API_PORT?.trim()) {
+                error("COUCHDB_API_PORT is required.")
+            }
+
+            if (!params.DATABASE?.trim()) {
+                error("Please select a DATABASE.")
+            }
+
+            if (!params.BACKUP_MODE == "TYPE") {
+                error("BACKUP_MODE is required.")
+            }
+            
+            
+            if (!params.DOCUMENT_TYPE?.trim()) {
+                error("DOCUMENT_TYPE is required.")
+            }
+            
+
+            echo "Validation successful."
+
+        }
+
+    }
+
+}
+
+        stage('Prepare Workspace') {
+
+            steps {
+
+                script {
+
+                    def backupDir = "${env.WORKSPACE}\\CouchDB_Backup\\${params.DATABASE}"
+
+                    switch(params.BACKUP_MODE) {
+
+                        case "DATABASE":
+                            backupDir += "\\DATABASE"
+                            break
+
+                        case "TYPE":
+                            backupDir += "\\TYPE\\${params.DOCUMENT_TYPE}"
+                            break
+
+                        case "DOCUMENT_ID":
+                            backupDir += "\\DOCUMENT_ID"
+                            break
+                    }
+
+                    env.BACKUP_DIR = backupDir
+
+                    powershell """
+                        New-Item `
+                            -ItemType Directory `
+                            -Force `
+                            -Path '${backupDir}' | Out-Null
+
+                        Write-Host ""
+                        Write-Host "Backup Directory Created:"
+                        Write-Host "${env.BACKUP_DIR}"
+                    """
+                }
+
+            }
+
+        }
+
+        stage('Print Parameters') {
+
+            steps {
+
+                script {
+
+                    echo """
+================ CouchDB Backup =================
+
+API Host      : ${params.COUCHDB_API_HOST}
+API Port      : ${params.COUCHDB_API_PORT}
+Database      : ${params.DATABASE}
+Backup Mode   : ${params.BACKUP_MODE}
+Document Type : ${params.DOCUMENT_TYPE}
+Document ID   : ${params.DOCUMENT_ID}
+Backup Folder : ${env.BACKUP_DIR}
+
+=================================================
+"""
+
+                }
+
+            }
+
+        }
+
+        stage('Generate Backup Request') {
+
+            steps {
+
+                script {
+
+                    def request = """
+{
+    "database":"${params.DATABASE}",
+    "backup_mode":"${params.BACKUP_MODE}",
+    "document_type":"${params.DOCUMENT_TYPE}",
+    "document_id":"${params.DOCUMENT_ID}",
+    "output_folder":"${env.BACKUP_DIR.replace("\\\\","\\\\\\\\")}"
+}
+"""
+
+                    writeFile file: 'backup.json', text: request
+
+                    echo "backup.json created."
+
+                }
+
+            }
+
+        }
+
+    }
+
+}

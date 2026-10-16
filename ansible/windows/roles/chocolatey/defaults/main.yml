@@ -1,0 +1,9 @@
+---
+# defaults file for roles/chocolatey
+choco_bin_path: "C:\\ProgramData\\chocolatey\\bin"
+putty_bin_path: "C:\\Program Files\\PuTTY"
+choco_windows_packages:
+  - name: putty
+    required: true
+  - name: jq
+    required: true

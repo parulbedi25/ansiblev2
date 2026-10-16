@@ -1,0 +1,15 @@
+---
+# defaults file for roles/couchdb-linux
+couchdb_admin_user: "admin"
+couchdb_admin_password: "Welcom3!"
+couchdb_bind_address: "0.0.0.0"
+couchdb_port: 5984
+couchdb_cookie: "081203E25ADD294488551C73A04D4DE3"
+# Keep major/minor/patch aligned with Windows (3.3.3-3). Linux repo suffix differs.
+couchdb_version: "3.4.3"
+# Repo releases to try (first match that contains couchdb_version and passes dependency check will be used).
+couchdb_repo_candidates:
+  - "{{ ansible_distribution_release }}"
+  - noble
+  - jammy
+  - focal

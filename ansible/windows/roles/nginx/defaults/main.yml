@@ -1,0 +1,25 @@
+---
+# defaults file for roles/nginx.
+nginx_version: "1.8.1"
+nginx_folder: "nginx-{{ nginx_version }}"
+nginx_zip: "{{ nginx_folder }}.zip"
+nginx_url: "http://nginx.org/download/{{ nginx_zip }}"
+temp_dir: "D:\\temp"
+nginx_apps_dir: "D:\\QASIP\\Apps"
+nginx_root_path: "{{ nginx_apps_dir }}\\nginx"
+nginx_port: 6003
+nginx_log_dir: "{{ nginx_root_path }}\\logs"
+
+# NGINX service configuration (NSSM)
+nginx_service_name: "ATMS-Nginx"
+nginx_service_display_name: "ATMS Nginx"
+nginx_service_description: "ATMS Nginx Reverse Proxy Service"
+nginx_service_restart_delay: 10000  # milliseconds (10 seconds)
+
+# Backend API configuration (used in nginx.conf.j2 template)
+# Overridden by IP_ADDRESS parameter from Jenkinsfile.provisioning via -e flag
+backend_api_host: "{{ ansible_host }}"
+backend_api_port: "8080"
+
+# Nginx listen port (used in nginx.conf.j2 template)
+nginx_listen_port: "6003"

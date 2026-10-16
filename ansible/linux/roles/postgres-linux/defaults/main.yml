@@ -1,0 +1,17 @@
+---
+# defaults file for roles/postgres-linux
+postgresql_version: "10.17"
+pg_superuser: "postgres"
+pg_superuser_password: "postgres"
+postgresql_database: "atms_master"
+postgresql_port: 5432
+postgresql_listen_addresses: "*"
+postgresql_install_dir: "/usr/local/pgsql"
+postgresql_data_dir: "/var/lib/postgresql/{{ postgresql_version.split('.')[0] }}/main"
+postgresql_log_dir: "/var/lib/postgresql/{{ postgresql_version.split('.')[0] }}/logs"
+postgresql_source_url: "https://ftp.postgresql.org/pub/source/v{{ postgresql_version }}/postgresql-{{ postgresql_version }}.tar.gz"
+postgresql_roles:
+  - admin
+  - developer
+  - app
+  - report

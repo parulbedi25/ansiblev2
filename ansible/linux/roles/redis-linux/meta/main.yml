@@ -1,0 +1,26 @@
+---
+galaxy_info:
+  author: your name
+  description: Install Redis from source and configure as systemd service on Ubuntu Linux systems
+  company: your company (optional)
+
+  license: GPL-2.0-or-later
+
+  min_ansible_version: 2.9
+
+  platforms:
+  - name: Ubuntu
+    versions:
+    - focal
+    - jammy
+    - noble
+
+  galaxy_tags:
+    - redis
+    - database
+    - cache
+    - source
+    - ubuntu
+    - linux
+
+dependencies: []

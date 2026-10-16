@@ -1,0 +1,4 @@
+---
+# defaults file for roles/node-linux
+nvm_version: "v0.39.3"
+node_version: "v10.15.1"

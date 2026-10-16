@@ -1,0 +1,14 @@
+---
+# defaults file for roles/openjdk
+# OpenJDK 8 (with JAVA_HOME)
+openjdk8_build: "402"
+openjdk8_zip: "OpenJDK8U-jdk_x64_windows_hotspot_8u402b06.zip"
+openjdk8_url: "https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u402-b06/{{ openjdk8_zip }}"
+
+# OpenJDK 17 (without JAVA_HOME)
+openjdk17_version: "17"
+openjdk17_build: "8"
+openjdk17_zip: "OpenJDK17U-jdk_x64_windows_hotspot_17.0.8_7.zip"
+openjdk17_url: "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.8+7/{{ openjdk17_zip }}"
+
+temp_dir: "D:\\temp"

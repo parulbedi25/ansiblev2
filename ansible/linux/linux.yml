@@ -1,0 +1,108 @@
+---
+- name: Setup Linux Servers
+  hosts: linux
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Ensure python3-apt is installed on Debian/Ubuntu
+      raw: |
+        if ! /usr/bin/python3 -c "import apt" >/dev/null 2>&1; then
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y python3-apt
+        fi
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Find python interpreter with apt module
+      raw: |
+        for p in /usr/bin/python3 /usr/bin/python3.12 /usr/bin/python3.11 /usr/bin/python3.10 /usr/bin/python3.9; do
+          if [ -x "$p" ] && "$p" -c "import apt" >/dev/null 2>&1; then
+            echo "$p"
+            exit 0
+          fi
+        done
+        echo "/usr/bin/python3"
+      register: python_with_apt
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Set interpreter for apt-based tasks
+      set_fact:
+        ansible_python_interpreter: "{{ python_with_apt.stdout }}"
+      when: ansible_os_family == "Debian"
+
+  vars:
+    # PostgreSQL Database Variables
+    postgresql_version: "10.17"
+    # postgresql_admin_user: "postgres"
+    # postgresql_admin_password: "admin"
+    # postgresql_database: "atm_master"
+    postgresql_port: 5432
+    # postgresql_listen_addresses: "*"
+
+    # OpenJDK Variables
+    java_versions: ["8", "17"]
+    java_default_version: "8"
+
+    # Redis Variables
+    # Windows uses redis 2.8.2101 (MS build); closest upstream tag for Linux is 2.8.24.
+    redis_version: "2.8.24"
+    redis_archive: "redis-{{ redis_version }}.tar.gz"
+    redis_url: "https://download.redis.io/releases/{{ redis_archive }}"
+    redis_src_dir: "/usr/local/src/redis-{{ redis_version }}"
+    redis_install_dir: "/usr/local/redis"
+  
+
+    # Python Variables
+    python_version: "3.11.4"
+
+    # Node Variables
+    node_version: "v10.15.1"
+
+    # Nginx Variables
+    nginx_version: "1.8.1"
+
+    # CouchDB Variables
+    couchdb_version: "3.4.3"
+    couchdb_bind_address: "0.0.0.0"
+    couchdb_port: 5984
+
+    # Gradel Variables
+    gradle_version: "2.1"
+    gradle_archive: "gradle-{{ gradle_version }}-all.zip"
+    gradle_url: "https://services.gradle.org/distributions/{{ gradle_archive }}"
+    gradle_install_dir: "/opt/gradle-{{ gradle_version }}"
+
+    # Tomcat Variables
+    tomcat_version_number: "9"
+    # java_version: "8"
+    tomcat_archive: "apache-tomcat-{{ tomcat_version }}.tar.gz"
+    tomcat_url: "https://archive.apache.org/dist/tomcat/tomcat-{{ tomcat_version_number }}/v{{ tomcat_version }}/bin/{{ tomcat_archive }}"
+    tomcat_install_dir: "/opt/apache-tomcat-{{ tomcat_version }}"
+    tomcat_home: "/opt/tomcat"
+
+    # pgAdmin Variables
+    pgadmin_email: "admin@pgadmin.com"
+    pgadmin_port: 8888
+
+
+  vars_files:
+    - secrets.yml
+
+  roles:
+    - hosts-entry-linux
+    - java-linux
+    - nginx-linux
+    - node-linux
+    - couchdb-linux
+    - redis-linux
+    - tomcat-linux
+    - gradle-linux
+    - postgres-linux
+    - pgadmin-linux
+    - git-linux
+    - python-linux
+    - python-ai-service-linux
+    - node-service-linux
+    

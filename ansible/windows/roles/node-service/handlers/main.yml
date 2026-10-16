@@ -1,0 +1,16 @@
+---
+# handlers file for node-service
+- name: restart node-service
+  win_service:
+    name: "{{ service_name }}"
+    state: restarted
+
+- name: stop node-service
+  win_service:
+    name: "{{ service_name }}"
+    state: stopped
+
+- name: start node-service
+  win_service:
+    name: "{{ service_name }}"
+    state: started

@@ -1,0 +1,8 @@
+---
+# vars file for roles/postgres
+pg_installer: "postgresql-{{ pg_version }}-windows-x64.exe"
+pg_url: "https://get.enterprisedb.com/postgresql/{{ pg_installer }}"
+temp_dir: "D:\\temp"
+pg_install_dir: "D:\\QASIP\\Apps\\postgres"
+pg_data_dir: "D:\\QASIP\\Data\\postgres"
+pg_service_name: "postgresql-x64-10"

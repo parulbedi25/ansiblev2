@@ -1,0 +1,4 @@
+---
+# defaults file for roles/gradle
+gradle_version: "2.1"
+gradle_home: "C:\\ProgramData\\chocolatey\\lib\\gradle\\tools\\gradle-{{ gradle_version }}"

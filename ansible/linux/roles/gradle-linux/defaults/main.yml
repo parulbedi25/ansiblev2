@@ -1,0 +1,6 @@
+---
+# defaults file for roles/gradle-linux
+gradle_version: "2.6"
+gradle_archive: "gradle-{{ gradle_version }}-all.zip"
+gradle_url: "https://services.gradle.org/distributions/{{ gradle_archive }}"
+gradle_install_dir: "/opt/gradle-{{ gradle_version }}"

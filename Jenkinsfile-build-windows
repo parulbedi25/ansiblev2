@@ -1,0 +1,1003 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: '',
+            description: 'Jenkins project agent label where this pipeline will run (format: project-env-ip, eg: copper-dev-10.10.3.150)'
+        )
+
+        string(
+            name: 'PROJECT_BRANCH',
+            defaultValue: '',
+            description: 'Project source code branch to checkout for build/deployment eg: qasip_devops'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+    }
+    environment {
+        PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+        NEXUS_REPO           = 'atms-modules'
+        VERSION        = '1.0.0'
+        BUILD_NUMBER   = "${env.BUILD_NUMBER}"
+        WAR_VERSION    = "1.0.0-${env.BUILD_NUMBER}"
+        DIST_VERSION   = "1.0.0-${env.BUILD_NUMBER}"
+
+        BASE_DEPLOY_DIR = 'D:\\deploys'
+        DEPLOY_DIR      = "D:\\${PROJECT_NAME}-code"
+        REPO_BASE_DIR   = "D:\\${PROJECT_NAME}-code"
+
+        JAVA_REPO   = 'git@10.10.1.68:andes/atms-app.git'
+        NODE_REPO   = 'git@10.10.1.68:andes/atms-node-microservice.git'
+        UI_REPO     = 'git@10.10.1.68:andes/atms-ui.git'
+        PYTHON_REPO = 'git@10.10.1.68:AI/AI.git'
+
+        GIT_CREDENTIALS_ID = 'jenkins-gitlab-118'
+        GRADLE_HOME = 'C:\\ProgramData\\chocolatey\\lib\\gradle\\tools\\gradle-2.1'
+        JAVA_HOME   = 'C:\\Program Files\\OpenJDK\\jdk8u402-b06'
+
+        GRADLE_PROJECT_DIR = "${DEPLOY_DIR}\\atms-app"
+        WAR_BUILD_DIR      = "${DEPLOY_DIR}\\atms-app\\atms-web\\build\\libs"
+
+        SPRING_PROFILE = 'local'
+        PATH = "${GRADLE_HOME}\\bin;${JAVA_HOME}\\bin;${env.PATH}"
+        ANSIBLE_OS = "windows"
+    }
+    stages {
+        
+        stage('Validate Parameters') {
+            steps {
+                script {
+
+                    env.AGENT_LABEL = params.PROJECT_TARGET_MACHINE?.trim()?.toLowerCase()
+                    env.BRANCH_NAME = params.PROJECT_BRANCH?.trim()
+                    
+
+                    def missing = []
+                    def formatErrors = []
+                    def notificationEmails = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+                    if (!env.AGENT_LABEL) missing << "PROJECT_TARGET_MACHINE"
+                    if (!env.BRANCH_NAME) missing << "PROJECT_BRANCH"
+                    if (!notificationEmails) {
+                        missing << "NOTIFICATION_EMAILS"
+                    }
+
+                    // -----------------------------
+                    // Validate NOTIFICATION_EMAILS
+                    // -----------------------------
+                    if (notificationEmails) {
+
+                        def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+                        def emailList = notificationEmails
+                                            .split(',')
+                                            .collect { it.trim() }
+                                            .findAll { it }
+
+                        // Check duplicates
+                        if (emailList.size() != emailList.unique().size()) {
+                            formatErrors << "Duplicate email addresses found in NOTIFICATION_EMAILS"
+                        }
+
+                        // Validate format
+                        for (email in emailList) {
+                            if (!(email ==~ emailRegex)) {
+                                formatErrors << "Invalid email format detected: ${email}"
+                            }
+                        }
+                    }
+
+                    if (missing || formatErrors) {
+                        error """
+BUILD FAILED ❌
+Missing required parameters:
+${missing.join('\n')}
+${formatErrors ? "Format Errors:\n${formatErrors.join('\n')}\n" : ""}
+
+Expected email format:
+user1@qasource.com, user2@qasource.com
+"""
+                    }
+
+                    echo "Parameters validated successfully ✅"
+                    echo "Agent → ${env.AGENT_LABEL}"
+                    echo "Branch → ${env.BRANCH_NAME}"
+                    echo "Notification Emails → ${notificationEmails}"
+                }
+            }
+        }
+        // =============================================
+// STAGE 0: Fetch SSH keys from Nexus for Git
+// =============================================
+        stage('Setup SSH Keys from Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    bat '''
+                        @echo off
+                        echo ========================================
+                        echo Setting up SSH Keys from Nexus
+                        echo ========================================
+        
+                        set "SSH_DIR=C:\\Windows\\System32\\config\\systemprofile\\.ssh"
+                        set "USER_SSH_DIR=%USERPROFILE%\\.ssh"
+        
+                        if not exist "%SSH_DIR%" (
+                            echo Creating system .ssh directory...
+                            mkdir "%SSH_DIR%"
+                        )
+        
+                        if not exist "%USER_SSH_DIR%" (
+                            echo Creating user .ssh directory...
+                            mkdir "%USER_SSH_DIR%"
+                        )
+        
+                        echo Downloading SSH key files from Nexus...
+        
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $headers = @{ Authorization = 'Basic ' + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%')) }; $sshDir = 'C:\\Windows\\System32\\config\\systemprofile\\.ssh'; $token = $null; $urls = @(); do { $uri = '%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%'; if ($token) { $uri += '&continuationToken=' + $token }; $r = Invoke-RestMethod -Uri $uri -Headers $headers; foreach ($i in $r.items) { foreach ($a in $i.assets) { if ($a.downloadUrl -match 'ssh-key') { $urls += $a.downloadUrl } } }; $token = $r.continuationToken } while ($token); Write-Host ('Found ' + $urls.Count + ' SSH key file(s)'); foreach ($u in $urls) { $f = $u.Split('/')[-1]; $outPath = Join-Path $sshDir $f; Invoke-WebRequest -Uri $u -Headers $headers -OutFile $outPath; Write-Host ('Downloaded: ' + $f) }; Write-Host 'SSH keys setup complete.'"
+        
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to setup SSH keys from Nexus
+                            exit /b 1
+                        )
+        
+                        echo.
+                        echo Checking if copy is required...
+                        
+                        if /I not "%SSH_DIR%"=="%USER_SSH_DIR%" (
+                            echo Copying SSH keys to user .ssh directory: %USER_SSH_DIR%
+                            xcopy /Y /Q "%SSH_DIR%\\*" "%USER_SSH_DIR%\\"
+                        
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to copy SSH keys to user .ssh directory
+                                exit /b 1
+                            )
+                        ) else (
+                            echo Source and destination are the same. Skipping copy.
+                        )
+        
+                        echo.
+                        echo SSH key files in system .ssh (%SSH_DIR%):
+                        dir /B "%SSH_DIR%"
+                        echo.
+                        echo SSH key files in user .ssh (%USER_SSH_DIR%):
+                        dir /B "%USER_SSH_DIR%"
+                        echo ========================================
+                    '''
+                }
+            }
+        }
+
+        stage('Download Common Scripts from Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    bat '''
+                        @echo off
+                        echo ========================================
+                        echo Preparing Scripts Directory
+                        echo ========================================
+
+                        set "SCRIPT_DIR=C:\\Windows\\Scripts"
+
+                        if exist "%SCRIPT_DIR%" (
+                            echo Existing folder found. Removing...
+                            rmdir /S /Q "%SCRIPT_DIR%"
+                        )
+
+                        echo Creating fresh scripts directory...
+                        mkdir "%SCRIPT_DIR%"
+
+                        echo.
+                        echo Downloading scripts from Nexus...
+                        echo ========================================
+
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$headers=@{Authorization='Basic '+[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%'))};$downloadDir='%SCRIPT_DIR%';$token=$null;$urls=@();do{$uri='%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%';if($token){$uri+='&continuationToken='+$token};$r=Invoke-RestMethod -Uri $uri -Headers $headers;foreach($i in $r.items){foreach($a in $i.assets){if($a.path -match 'script' -and ($a.path -match '\\.js$' -or $a.path -match '\\.json$')){$urls+=$a.downloadUrl}}};$token=$r.continuationToken}while($token);Write-Host('Found '+$urls.Count+' file(s)');if($urls.Count -eq 0){throw 'No scripts found in repo'};foreach($u in $urls){$f=Split-Path $u -Leaf;$out=Join-Path $downloadDir $f;Write-Host('Downloading: '+$f);Invoke-WebRequest -Uri $u -Headers $headers -OutFile $out -UseBasicParsing};Write-Host 'Scripts download complete.'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download scripts
+                            exit /b 1
+                        )
+
+                        echo.
+                        echo Downloaded files:
+                        dir /B "%SCRIPT_DIR%"
+                        echo ========================================
+                    '''
+                }
+            }
+        }
+        stage('Download NPM Packages') {
+            steps {
+                script {
+                    bat """
+                        @echo off
+                        echo ========================================
+                        echo Installing Node Packages
+                        echo ========================================
+
+                        set "SCRIPT_DIR=C:\\Windows\\Scripts"
+
+                        if not exist "%SCRIPT_DIR%\\package.json" (
+                            echo ERROR: package.json not found in %SCRIPT_DIR%
+                            exit /b 1
+                        )
+
+                        cd /d "%SCRIPT_DIR%"
+                        call npm install
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: npm install failed
+                            exit /b 1
+                        )
+
+                        echo ========================================
+                        echo NPM Install Completed Successfully
+                        echo ========================================
+                    """
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 1: Clone latest code from all 4 repos
+        // =============================================
+        stage('Checkout Code from Repositories') {
+            steps {
+                script {
+                    // Generate date-based release version
+                    env.BUILD_DATE = new Date().format('dd-MM-yyyy')
+                    env.RELEASE_VERSION = "${env.BUILD_DATE}-v${VERSION}-${env.BUILD_NUMBER}"
+
+                    echo "========================================="
+                    echo "Checking out code from 4 repositories"
+                    echo "Branch: ${params.PROJECT_BRANCH}"
+                    echo "Release Version: ${env.RELEASE_VERSION}"
+                    echo "Nexus Path: ${PROJECT_NAME}/${env.RELEASE_VERSION}/"
+                    echo "========================================="
+
+                    bat """
+                        if not exist "${REPO_BASE_DIR}" mkdir "${REPO_BASE_DIR}"
+                    """
+
+                    def repositories = [
+                        [name: 'AI-Python', url: 'git@10.10.1.68:AI/AI.git', type: 'Python'],
+                        [name: 'atms-app', url: 'git@10.10.1.68:andes/atms-app.git', type: 'Java'],
+                        [name: 'atms-node-microservice', url: 'git@10.10.1.68:andes/atms-node-microservice.git', type: 'Node.js'],
+                        [name: 'atms-ui', url: 'git@10.10.1.68:andes/atms-ui.git', type: 'UI']
+                    ]
+
+                    repositories.each { repo ->
+                        def branchName = repo.branch ?: params.PROJECT_BRANCH
+                        echo "Checking out: ${repo.name} (${repo.type}) - Branch: ${branchName}"
+                        dir("${REPO_BASE_DIR}\\${repo.name}") {
+                            checkout([
+                                $class: 'GitSCM',
+                                branches: [[name: "*/${branchName}"]],
+                                userRemoteConfigs: [[
+                                    url: repo.url,
+                                    credentialsId: env.GIT_CREDENTIALS_ID
+                                ]],
+                                extensions: [[
+                                    $class: 'CloneOption',
+                                    shallow: true,
+                                    depth: 1
+                                ]]
+                            ])
+                        }
+                        echo "${repo.name} checked out successfully from branch: ${branchName}"
+                    }
+
+                    // Clean up @tmp folders created by Jenkins checkout
+                    bat """
+                        @echo off
+                        echo ========================================
+                        echo Cleaning up @tmp folders
+                        echo ========================================
+                        for /D %%d in ("${REPO_BASE_DIR}\\*@tmp") do (
+                            echo Removing: %%d
+                            rmdir /S /Q "%%d"
+                        )
+                        echo @tmp cleanup done.
+                    """
+
+                    bat """
+                        @echo off
+                        echo.
+                        echo ========================================
+                        echo Repository Checkout Summary
+                        echo ========================================
+                        echo Branch: ${params.PROJECT_BRANCH}
+                        echo Location: ${REPO_BASE_DIR}
+                        echo.
+                        dir /B "${REPO_BASE_DIR}"
+                        echo.
+                        echo ========================================
+                    """
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 2: Install Node dependencies via npm
+        // =============================================
+        stage('Install Node Dependencies') {
+            steps {
+                bat """
+                    @echo off
+                    echo ========================================
+                    echo Installing Node dependencies for atms-node-microservice
+                    echo ========================================
+
+                    cd /d "${REPO_BASE_DIR}\\atms-node-microservice"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: atms-node-microservice directory not found
+                        exit /b 1
+                    )
+
+                    echo Running npm install...
+                    call npm install
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: npm install failed for atms-node-microservice
+                        exit /b 1
+                    )
+
+                    if not exist "node_modules" (
+                        echo ERROR: node_modules folder not found after npm install
+                        exit /b 1
+                    )
+
+                    echo npm install completed successfully.
+                """
+            }
+        }
+
+        // =============================================
+        // STAGE 3: Prepare configs and inject credentials
+        //          for Python AI and Java atms-app
+        // =============================================
+        stage('Prepare Configs and Inject Credentials') {
+            steps {
+                // Step 1: Rename .env.example to .env
+                bat """
+                    @echo off
+                    echo ========================================
+                    echo Renaming .env.example to .env
+                    echo ========================================
+
+                    cd /d "${REPO_BASE_DIR}\\AI-Python\\test_script_generator"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Cannot navigate to AI-Python\\test_script_generator
+                        exit /b 1
+                    )
+
+                    if exist ".env.example" (
+                        if exist ".env" (
+                            echo .env already exists, replacing with .env.example...
+                            del /F /Q ".env"
+                        )
+                        rename ".env.example" ".env"
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to rename .env.example to .env
+                            exit /b 1
+                        )
+                        echo .env.example renamed to .env successfully
+                    ) else (
+                        echo WARNING: .env.example not found in AI-Python\\test_script_generator
+                        exit /b 1
+                    )
+                """
+
+                // Step 2: Inject Python credentials into .env
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'python-db-credentials',
+                        usernameVariable: 'COUCH_USER',
+                        passwordVariable: 'COUCH_PASS'
+                    ),
+                    string(
+                        credentialsId: 'openai-api-key',
+                        variable: 'OPENAI_KEY'
+                    )
+                ]) {
+                    bat '''
+                        @echo off
+                        echo ========================================
+                        echo Injecting Python AI credentials into .env
+                        echo ========================================
+
+                        set "ENV_FILE=%REPO_BASE_DIR%\\AI-Python\\test_script_generator\\.env"
+
+                        if not exist "%ENV_FILE%" (
+                            echo ERROR: .env file not found at %ENV_FILE%
+                            exit /b 1
+                        )
+
+                        echo Updating COUCH_DB_USER, COUCH_DB_PASSWORD, and OPENAI_API_KEY...
+
+                        powershell -Command "$content = Get-Content '%ENV_FILE%' -Raw; $content = $content -replace 'COUCH_DB_USER\\s*=\\s*\\\".*?\\\"', 'COUCH_DB_USER = \\\"%COUCH_USER%\\\"'; $content = $content -replace 'COUCH_DB_PASSWORD\\s*=\\s*\\\".*?\\\"', 'COUCH_DB_PASSWORD = \\\"%COUCH_PASS%\\\"'; $content = $content -replace 'OPENAI_API_KEY\\s*=\\s*.*', 'OPENAI_API_KEY=%OPENAI_KEY%'; Set-Content '%ENV_FILE%' $content -NoNewline;"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to update Python .env credentials
+                            exit /b 1
+                        )
+
+                        echo Python AI credentials injected successfully.
+                    '''
+                }
+
+                // Step 3: Inject Java DB credentials into settings-local.properties
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'java-db-credentials',
+                        usernameVariable: 'JDBC_USER',
+                        passwordVariable: 'JDBC_PASS'
+                    )
+                ]) {
+                    bat '''
+                        @echo off
+                        echo ========================================
+                        echo Injecting Java DB credentials into settings-local.properties
+                        echo ========================================
+
+                        set "PROPS_FILE=%REPO_BASE_DIR%\\atms-app\\atms-web\\src\\main\\resources\\settings-local.properties"
+
+                        if not exist "%PROPS_FILE%" (
+                            echo ERROR: settings-local.properties not found at %PROPS_FILE%
+                            exit /b 1
+                        )
+
+                        echo Updating jdbc.username and jdbc.password...
+
+                        powershell -Command "$content = Get-Content '%PROPS_FILE%' -Raw; $content = $content -replace 'jdbc\\.username\\s*=\\s*.*', 'jdbc.username = %JDBC_USER%'; $content = $content -replace 'jdbc\\.password\\s*=\\s*.*', 'jdbc.password = %JDBC_PASS%'; Set-Content '%PROPS_FILE%' $content -NoNewline;"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to update Java DB credentials
+                            exit /b 1
+                        )
+
+                        echo Java DB credentials injected successfully.
+                    '''
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 4: Zip and upload source code to Nexus
+        //          (node-microservice includes node_modules)
+        // =============================================
+        stage('Upload Source Code to Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        // Upload atms-node-microservice source (WITH node_modules)
+                        bat """
+                            @echo off
+                            echo ========================================
+                            echo Zipping atms-node-microservice (with node_modules)
+                            echo ========================================
+
+                            cd /d "${REPO_BASE_DIR}\\atms-node-microservice"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: atms-node-microservice directory not found
+                                exit /b 1
+                            )
+
+                            echo Creating archive: atms-node-microservice.zip
+                            if exist "${REPO_BASE_DIR}\\atms-node-microservice.zip" del /Q "${REPO_BASE_DIR}\\atms-node-microservice.zip"
+                            powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory('${REPO_BASE_DIR}\\atms-node-microservice', '${REPO_BASE_DIR}\\atms-node-microservice.zip')"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to create atms-node-microservice zip
+                                exit /b 1
+                            )
+
+                            echo Uploading atms-node-microservice to Nexus...
+                            curl.exe -s -o nul -w "%%{http_code}" -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                              --upload-file "${REPO_BASE_DIR}\\atms-node-microservice.zip" ^
+                              "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-node-microservice/atms-node-microservice.zip" > http_code_node.txt
+
+                            set /p HTTP_CODE=<http_code_node.txt
+                            del http_code_node.txt
+
+                            echo HTTP Response Code: %HTTP_CODE%
+
+                            if "%HTTP_CODE%"=="201" (
+                                echo atms-node-microservice uploaded successfully!
+                                echo Location: ${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-node-microservice/
+                            ) else (
+                                echo ERROR: Upload failed with HTTP code: %HTTP_CODE%
+                                exit /b 1
+                            )
+
+                            del "${REPO_BASE_DIR}\\atms-node-microservice.zip"
+                        """
+
+                        // Upload AI-Python source
+                        bat """
+                            @echo off
+                            echo ========================================
+                            echo Zipping AI-Python source code
+                            echo ========================================
+
+                            cd /d "${REPO_BASE_DIR}\\AI-Python"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: AI-Python directory not found
+                                exit /b 1
+                            )
+
+                            echo Creating archive: AI-Python.zip
+                            if exist "${REPO_BASE_DIR}\\AI-Python.zip" del /Q "${REPO_BASE_DIR}\\AI-Python.zip"
+                            powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory('${REPO_BASE_DIR}\\AI-Python', '${REPO_BASE_DIR}\\AI-Python.zip')"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to create AI-Python zip
+                                exit /b 1
+                            )
+
+                            echo Uploading AI-Python source to Nexus...
+                            curl.exe -s -o nul -w "%%{http_code}" -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                              --upload-file "${REPO_BASE_DIR}\\AI-Python.zip" ^
+                              "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/AI-Python/AI-Python.zip" > http_code_py.txt
+
+                            set /p HTTP_CODE=<http_code_py.txt
+                            del http_code_py.txt
+
+                            echo HTTP Response Code: %HTTP_CODE%
+
+                            if "%HTTP_CODE%"=="201" (
+                                echo AI-Python source uploaded successfully!
+                                echo Location: ${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/AI-Python/
+                            ) else (
+                                echo ERROR: Upload failed with HTTP code: %HTTP_CODE%
+                                exit /b 1
+                            )
+
+                            del "${REPO_BASE_DIR}\\AI-Python.zip"
+                        """
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 4: Install UI dependencies via npm & bower
+        // =============================================
+        stage('Install UI Dependencies') {
+            steps {
+                bat """
+                    @echo off
+                    echo ========================================
+                    echo Installing atms-ui dependencies
+                    echo ========================================
+
+                    cd /d "${REPO_BASE_DIR}\\atms-ui"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: atms-ui directory not found
+                        exit /b 1
+                    )
+
+                    echo [1/3] Running npm install...
+                    call npm install
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: npm install failed
+                        exit /b 1
+                    )
+
+                    echo npm install completed successfully.
+                    echo.
+
+                    echo [2/3] Checking if bower is installed...
+                    call npx bower --version >nul 2>&1
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo bower not found, installing globally...
+                        call npm install -g bower
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to install bower
+                            exit /b 1
+                        )
+
+                        echo bower installed successfully.
+                    ) else (
+                        echo bower is already available.
+                    )
+
+                    echo.
+                    echo [3/3] Running bower install...
+                    call npx bower install --allow-root
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: bower install failed
+                        exit /b 1
+                    )
+
+                    echo bower install completed successfully.
+                    echo.
+                    echo All atms-ui dependencies installed.
+                """
+            }
+        }
+
+        // =============================================
+        // STAGE 5: Clean old WAR files before building
+        // =============================================
+        stage('Clean Old Build Artifacts') {
+            steps {
+                bat """
+                    @echo off
+                    echo ========================================
+                    echo Cleaning Old Build Artifacts
+                    echo ========================================
+
+                    if exist "${WAR_BUILD_DIR}" (
+                        echo Found existing build directory: ${WAR_BUILD_DIR}
+                        echo Deleting old WAR files...
+                        del /Q "${WAR_BUILD_DIR}\\*.war" 2>nul
+                        echo Old WAR files cleaned.
+                    ) else (
+                        echo No existing build directory found. Skipping cleanup.
+                    )
+
+                    echo Cleanup completed successfully!
+                """
+            }
+        }
+
+        // =============================================
+        // STAGE 6: Build Java WAR from cloned atms-app
+        // =============================================
+        stage('Build Java Application') {
+            steps {
+                bat """
+                    @echo off
+                    echo ========================================
+                    echo Building Java Application
+                    echo Build Number: ${BUILD_NUMBER}
+                    echo WAR Version: ${WAR_VERSION}
+                    echo ========================================
+
+                    set GRADLE_HOME=${GRADLE_HOME}
+                    set JAVA_HOME=${JAVA_HOME}
+                    set PATH=${GRADLE_HOME}\\bin;${JAVA_HOME}\\bin;%PATH%
+
+                    echo GRADLE_HOME=%GRADLE_HOME%
+                    echo JAVA_HOME=%JAVA_HOME%
+                    echo.
+
+                    echo Checking Gradle version...
+                    call gradle -v
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Gradle not found
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Checking Java version...
+                    call java -version
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Java not found
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo ========================================
+                    echo Navigating to project directory: ${GRADLE_PROJECT_DIR}
+                    cd /d "${GRADLE_PROJECT_DIR}"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to navigate to ${GRADLE_PROJECT_DIR}
+                        exit /b 1
+                    )
+
+                    echo Current directory:
+                    cd
+                    echo.
+
+                    if not exist "build.gradle" (
+                        echo ERROR: build.gradle not found in current directory
+                        echo Directory contents:
+                        dir
+                        exit /b 1
+                    )
+
+                    echo Found build.gradle
+                    echo.
+                    echo ========================================
+                    echo Starting Gradle Build Process
+                    echo Running: gradle clean war -Dspring.profiles.active=${SPRING_PROFILE}
+                    echo ========================================
+                    echo.
+
+                    call gradle clean war -Dspring.profiles.active=${SPRING_PROFILE}
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo.
+                        echo ========================================
+                        echo ERROR: Gradle build failed
+                        echo ========================================
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo ========================================
+                    echo Build completed successfully!
+                    echo ========================================
+                    echo.
+
+                    if not exist "${WAR_BUILD_DIR}\\*.war" (
+                        echo ERROR: No WAR file found in ${WAR_BUILD_DIR}
+                        exit /b 1
+                    )
+
+                    echo WAR file created:
+                    dir "${WAR_BUILD_DIR}\\*.war"
+                    echo.
+                """
+            }
+        }
+
+        // =============================================
+        // STAGE 7: Upload built WAR to Nexus
+        // =============================================
+        stage('Upload WAR to Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        def uploadStatus = bat(script: """
+                            @echo off
+                            echo ========================================
+                            echo Uploading WAR to Nexus (Version: ${WAR_VERSION})
+                            echo ========================================
+
+                            cd /d "${WAR_BUILD_DIR}"
+
+                            set WAR_FILE=
+                            for %%f in (*.war) do set WAR_FILE=%%f
+
+                            if not defined WAR_FILE (
+                                echo ERROR: No WAR file found
+                                exit /b 1
+                            )
+
+                            echo Found WAR file: %WAR_FILE%
+                            echo Uploading as ROOT.war to: ${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-app/ROOT.war
+                            echo.
+
+                            curl.exe -s -o nul -w "%%{http_code}" -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                              --upload-file "%WAR_FILE%" ^
+                              "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-app/ROOT.war" > http_code.txt
+
+                            set /p HTTP_CODE=<http_code.txt
+                            del http_code.txt
+
+                            echo HTTP Response Code: %HTTP_CODE%
+
+                            if "%HTTP_CODE%"=="201" (
+                                echo Upload successful!
+                                echo Location: ${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-app/
+                                exit /b 0
+                            ) else (
+                                echo Upload failed with HTTP code: %HTTP_CODE%
+                                exit /b 1
+                            )
+                        """, returnStatus: true)
+
+                        if (uploadStatus != 0) {
+                            error("Failed to upload WAR file to Nexus")
+                        }
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 8: Build atms-ui dist and upload to Nexus
+        // =============================================
+        stage('Build and Upload atms-ui dist') {
+            steps {
+                script {
+                    bat """
+                        @echo off
+                        echo ========================================
+                        echo Building atms-ui dist (Version: ${DIST_VERSION})
+                        echo ========================================
+
+                        cd /d "${REPO_BASE_DIR}\\atms-ui"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to navigate to atms-ui directory
+                            exit /b 1
+                        )
+
+                        if exist "dist" (
+                            echo Cleaning old dist folder...
+                            rmdir /S /Q dist
+                        )
+
+                        echo Installing npm dependencies...
+                        call npm install
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: npm install failed
+                            exit /b 1
+                        )
+
+                        echo Running gulp build...
+                        call npx gulp build --api_host http://localhost:8080
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: gulp build failed
+                            exit /b 1
+                        )
+
+                        if not exist "dist" (
+                            echo ERROR: dist folder not found after build
+                            exit /b 1
+                        )
+
+                        echo Build completed successfully!
+                    """
+
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        def uploadDistStatus = bat(script: """
+                            @echo off
+                            echo ========================================
+                            echo Uploading atms-ui dist to Nexus
+                            echo ========================================
+
+                            cd /d "${REPO_BASE_DIR}\\atms-ui"
+
+                            if not exist "dist" (
+                                echo ERROR: dist folder not found
+                                exit /b 1
+                            )
+
+                            echo Creating archive: atms-ui-dist.tar.gz
+                            tar -czf atms-ui-dist.tar.gz -C dist .
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to create tar.gz archive
+                                exit /b 1
+                            )
+
+                            echo Uploading to: ${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-ui/
+
+                            curl.exe -s -o nul -w "%%{http_code}" -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                              --upload-file "atms-ui-dist.tar.gz" ^
+                              "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-ui/atms-ui-dist.tar.gz" > http_code_dist.txt
+
+                            set /p HTTP_CODE=<http_code_dist.txt
+                            del http_code_dist.txt
+
+                            echo HTTP Response Code: %HTTP_CODE%
+
+                            if "%HTTP_CODE%"=="201" (
+                                echo Upload successful!
+                                echo Location: ${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/atms-ui/
+                                del atms-ui-dist.tar.gz
+                                exit /b 0
+                            ) else (
+                                echo Upload failed with HTTP code: %HTTP_CODE%
+                                exit /b 1
+                            )
+                        """, returnStatus: true)
+
+                        if (uploadDistStatus != 0) {
+                            error("Failed to upload atms-ui dist folder to Nexus")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    
+                    echo """
+        ========================================
+        BUILD SUCCESSFUL
+        ========================================
+        All components processed successfully:
+        - Git Repos cloned from branch: ${params.PROJECT_BRANCH}
+        - Release Version: ${RELEASE_VERSION}
+        - Nexus Base Path: ${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/
+        - atms-node-microservice: uploaded (with node_modules)
+        - AI-Python: uploaded
+        - atms-app: ROOT.war uploaded
+        - atms-ui: dist uploaded
+        ========================================
+        """
+                def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+                bat """
+                @echo off
+                node C:\\Windows\\Scripts\\sendBuildEmail.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="${params.NOTIFICATION_EMAILS}" --projectName="%PROJECT_NAME%" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType=%ANSIBLE_OS% --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                """
+                // sleep(time: 4, unit: 'SECONDS')
+
+                // bat """
+                // @echo off
+                // node C:\\Windows\\Scripts\\sendBuildEmail-devops.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --projectName="%PROJECT_NAME%" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType=%ANSIBLE_OS% --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                // """
+                }
+            }
+        }
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    echo """
+        ========================================
+        BUILD FAILED
+        ========================================
+        Please check the logs above for errors.
+        ========================================
+        """
+                }
+                // script {
+                //     def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+                //     bat """
+                //     @echo off
+                //     node C:\\Windows\\Scripts\\sendBuildEmail-devops.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --projectName="%PROJECT_NAME%" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType=%ANSIBLE_OS% --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                //     """
+                // }
+            }
+        }
+    }
+}

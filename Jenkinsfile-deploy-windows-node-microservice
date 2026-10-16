@@ -1,0 +1,481 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            description: 'Jenkins target machine label (example: copper-dev-10.10.3.150)'
+        )
+
+        string(
+            name: 'BUILD_VERSION',
+            description: 'Build version to deploy (example: 26-05-2026-v1.0.0-120)'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma separated email addresses'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['D', 'E', 'F'],
+            description: 'Drive used for deployment and scripts'
+)
+    }
+
+    environment {
+
+        PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
+        SERVICE_NAME         = 'atms-node-microservice'
+
+        // Nexus
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        // Workspace
+        NODE_MICROSERVICE_DEPLOY_DIR = "${params.DEPLOY_DRIVE}:\\QASIP\\Apps\\node-microservice"
+        NODE_MICROSERVICE_APP_DIR    = "${NODE_MICROSERVICE_DEPLOY_DIR}"
+
+        // Artifact stored on Nexus
+        ARTIFACT_NAME      = "${SERVICE_NAME}.tar.gz"
+        NEXUS_DOWNLOAD_URL = "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${params.BUILD_VERSION}/${SERVICE_NAME}/${ARTIFACT_NAME}"
+        ARTIFACT_PATH      = "${NODE_MICROSERVICE_APP_DIR}\\${ARTIFACT_NAME}"
+
+        ANSIBLE_OS         = "windows"
+    }
+
+    stages {
+
+        // Stop Node Service
+        stage('Stop Node Service') {
+            steps {
+
+                bat '''
+                    @echo off
+
+                    echo ========================================
+                    echo Stopping Node Microservice
+                    echo ========================================
+
+                    net stop ATMS-Node-Microservice 2>nul ^
+                    || echo Service was already stopped
+
+                    taskkill /F /IM node.exe 2>nul ^
+                    || echo No node process found
+
+                    echo Waiting for file locks to release...
+                    ping 127.0.0.1 -n 10 > nul
+
+                    echo Node service stopped
+                '''
+            }
+        }
+
+        // Download Artifact From Nexus
+        stage('Download Artifact') {
+
+            steps {
+
+                script {
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: env.NEXUS_CREDENTIALS_ID,
+                            usernameVariable: 'NEXUS_USER',
+                            passwordVariable: 'NEXUS_PASSWORD'
+                        )
+                    ]) {
+
+                        bat """
+                            @echo off
+                            setlocal
+
+                            echo ========================================
+                            echo Preparing Deployment Directory
+                            echo ========================================
+
+                            if exist "%NODE_MICROSERVICE_DEPLOY_DIR%" (
+
+                                echo Cleaning deployment directory...
+
+                                for /d %%D in ("%NODE_MICROSERVICE_DEPLOY_DIR%\\*") do (
+                                    rmdir /S /Q "%%D"
+                                )
+
+                                del /F /Q "%NODE_MICROSERVICE_DEPLOY_DIR%\\*.*" 2>nul
+
+                            ) else (
+
+                                mkdir "%NODE_MICROSERVICE_DEPLOY_DIR%"
+                            )
+
+                            echo ========================================
+                            echo Downloading Artifact
+                            echo ========================================
+
+                            curl.exe ^
+                            -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                            -L ^
+                            -o "${ARTIFACT_PATH}" ^
+                            "${NEXUS_DOWNLOAD_URL}"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to download artifact
+                                exit /b 1
+                            )
+
+                            echo Download successful
+                        """
+                    }
+                }
+            }
+        }
+
+        // Extract Artifact
+        stage('Extract Artifact') {
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Extracting Artifact
+                    echo ========================================
+
+                    cd /d "%NODE_MICROSERVICE_APP_DIR%"
+
+                    tar -xzf "${ARTIFACT_NAME}"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to extract artifact
+                        exit /b 1
+                    )
+
+                    del /F /Q "${ARTIFACT_NAME}"
+
+                    echo Artifact extracted successfully
+                """
+            }
+        }
+
+
+        // Check if scripts already exist
+        stage('Check Existing Scripts Directory') {
+
+            steps {
+
+                script {
+
+                    def scriptExists = bat(
+                        returnStatus: true,
+                        script: """
+                            @echo off
+
+                            set "SCRIPT_DIR=${params.DEPLOY_DRIVE}:\\Scripts"
+
+                            echo ========================================
+                            echo Checking Existing Scripts Directory
+                            echo ========================================
+
+                            echo Checking: %SCRIPT_DIR%
+
+                            REM Check directory exists
+                            if not exist "%SCRIPT_DIR%" (
+                                echo Scripts directory does not exist
+                                exit /b 1
+                            )
+
+                            REM Check for package.json (indicates scripts already downloaded)
+                            if not exist "%SCRIPT_DIR%\\package.json" (
+                                echo package.json not found
+                                exit /b 1
+                            )
+
+                            echo Existing scripts found
+                            dir /B "%SCRIPT_DIR%"
+
+                            exit /b 0
+                        """
+                    )
+
+                    if (scriptExists == 0) {
+                        env.SKIP_SCRIPT_SETUP = "true"
+                        echo "Scripts already exist. Skipping download and npm install."
+                    } else {
+                        env.SKIP_SCRIPT_SETUP = "false"
+                        echo "Scripts not found. Will download and run npm install."
+                    }
+                }
+            }
+        }
+
+
+
+         //  Download Common Scripts from Nexus
+        stage('Download Common Scripts from Nexus') {
+
+            when {
+               expression { env.SKIP_SCRIPT_SETUP == "false" }
+            }
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat '''
+                        @echo off
+                        setlocal
+
+                        echo ========================================
+                        echo Preparing Scripts Directory
+                        echo ========================================
+
+                        set "SCRIPT_DIR=%DEPLOY_DRIVE%:\\Scripts"
+
+                        if exist "%SCRIPT_DIR%" (
+                            echo Existing folder found. Removing...
+                            rmdir /S /Q "%SCRIPT_DIR%"
+                        )
+
+                        echo Creating fresh scripts directory...
+                        mkdir "%SCRIPT_DIR%"
+
+                        echo ========================================
+                        echo Downloading Scripts from Nexus
+                        echo ========================================
+
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$headers=@{Authorization='Basic '+[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%'))};$downloadDir='%SCRIPT_DIR%';$token=$null;$urls=@();do{$uri='%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%';if($token){$uri+='&continuationToken='+$token};$r=Invoke-RestMethod -Uri $uri -Headers $headers;foreach($i in $r.items){foreach($a in $i.assets){if($a.path -match 'script' -and ($a.path -match '\\.js$' -or $a.path -match '\\.json$')){$urls+=$a.downloadUrl}}};$token=$r.continuationToken}while($token);Write-Host('Found '+$urls.Count+' file(s)');if($urls.Count -eq 0){throw 'No scripts found in repo'};foreach($u in $urls){$f=Split-Path $u -Leaf;$out=Join-Path $downloadDir $f;Write-Host('Downloading: '+$f);Invoke-WebRequest -Uri $u -Headers $headers -OutFile $out -UseBasicParsing};Write-Host 'Scripts download complete.'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download scripts
+                            exit /b 1
+                        )
+
+                        echo Downloaded files:
+                        dir /B "%SCRIPT_DIR%"
+                    '''
+                }
+            }
+        }
+
+            // Installing Node packages for Custom notification service
+        stage('Run npm install') {
+
+            when {
+               expression { env.SKIP_SCRIPT_SETUP == "false" }
+            }
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Running npm install
+                    echo ========================================
+
+                    set "SCRIPT_DIR=${params.DEPLOY_DRIVE}:\\Scripts"
+
+                    cd /d "%SCRIPT_DIR%"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Script directory not found
+                        exit /b 1
+                    )
+
+                    call npm install --force
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: npm install failed
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo ========================================
+                    echo Verifying node_modules
+                    echo ========================================
+
+                    if not exist "node_modules" (
+                        echo ERROR: node_modules folder not found
+                        exit /b 1
+                    )
+
+                    echo node_modules created successfully
+
+                    dir node_modules
+
+                    echo.
+                    echo NPM Install Completed Successfully
+                """
+            }
+        }
+
+
+        // Start Node Service
+        stage('Start Node Service') {
+
+            steps {
+
+                bat '''
+                    @echo off
+
+                    echo ========================================
+                    echo Starting Node Microservice
+                    echo ========================================
+
+                    if not exist "%NODE_MICROSERVICE_APP_DIR%\\logs" (
+                        mkdir "%NODE_MICROSERVICE_APP_DIR%\\logs"
+                    )
+
+                    net start ATMS-Node-Microservice
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to start service
+                        exit /b 1
+                    )
+
+                    ping 127.0.0.1 -n 8 > nul
+
+                    echo Verifying service state...
+
+                    sc query ATMS-Node-Microservice | findstr "RUNNING"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Service is not running
+                        exit /b 1
+                    )
+
+                    echo Node microservice started successfully
+                '''
+            }
+        }
+
+
+    }
+
+    post {
+
+        success {
+
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+
+                script {
+
+                    echo """
+                    ========================================
+                    DEPLOYMENT SUCCESSFUL
+                    ========================================
+
+                    Service Name    : ${env.SERVICE_NAME}
+                    Build Version   : ${params.BUILD_VERSION}
+                    Target Machine  : ${params.PROJECT_TARGET_MACHINE}
+                    Status          : RUNNING
+
+                    ========================================
+                    """
+
+                    def executionTime =
+                        currentBuild.durationString.replace(' and counting', '')
+
+                    bat """
+                        @echo off
+
+                        node %DEPLOY_DRIVE%:\\Scripts\\sendDeploymentEmail.js ^
+                        --smtpServer=%SMTP_SERVER% ^
+                        --smtpUser=%SMTP_USER% ^
+                        --smtpPassword=%SMTP_PASSWORD% ^
+                        --smtpPort=%SMTP_PORT% ^
+                        --senderName="DevOps QASIP" ^
+                        --senderEmail="copper@qasource.com" ^
+                        --receiverEmail="${params.NOTIFICATION_EMAILS}" ^
+                        --osType="${ANSIBLE_OS}" ^
+                        --targetMachine="${params.PROJECT_TARGET_MACHINE}" ^
+                        --buildVersion="${params.BUILD_VERSION}" ^
+                        --currentVersion="${params.BUILD_VERSION}" ^
+                        --executionTime="${executionTime}" ^
+                        --status="success" ^
+                        --runUrl="${env.BUILD_URL}"
+                    """
+                }
+            }
+        }
+
+        failure {
+
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+
+                script {
+
+                    echo """
+                    ========================================
+                    DEPLOYMENT FAILED
+                    ========================================
+
+                    Service Name    : ${env.SERVICE_NAME}
+                    Build Version   : ${params.BUILD_VERSION}
+                    Target Machine  : ${params.PROJECT_TARGET_MACHINE}
+
+                    Check Jenkins logs for failure reason.
+                    ========================================
+                    """
+
+                    def executionTime =
+                        currentBuild.durationString.replace(' and counting', '')
+
+                    bat """
+                        @echo off
+
+                        node %DEPLOY_DRIVE%:\\Scripts\\sendDeploymentEmail.js ^
+                        --smtpServer=%SMTP_SERVER% ^
+                        --smtpUser=%SMTP_USER% ^
+                        --smtpPassword=%SMTP_PASSWORD% ^
+                        --smtpPort=%SMTP_PORT% ^
+                        --senderName="DevOps QASIP" ^
+                        --senderEmail="copper@qasource.com" ^
+                        --osType="${ANSIBLE_OS}" ^
+                        --receiverEmail="${params.NOTIFICATION_EMAILS}" ^
+                        --targetMachine="${params.PROJECT_TARGET_MACHINE}" ^
+                        --buildVersion="${params.BUILD_VERSION}" ^
+                        --currentVersion="N/A" ^
+                        --executionTime="${executionTime}" ^
+                        --status="failure" ^
+                        --runUrl="${env.BUILD_URL}"
+                    """
+                }
+            }
+        }
+
+        always {
+            cleanWs()
+        }
+    }
+}

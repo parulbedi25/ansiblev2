@@ -1,0 +1,41 @@
+---
+# tasks file for roles/eclipse
+- name: Check if Eclipse is already installed
+  win_stat:
+    path: "{{ eclipse_exe_path }}"
+  register: eclipse_installed
+
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+  when: not eclipse_installed.stat.exists
+
+- name: Download Eclipse 2019-09 ZIP
+  win_get_url:
+    url: "{{ eclipse_url }}"
+    dest: "{{ temp_dir }}\\{{ eclipse_zip }}"
+  when: not eclipse_installed.stat.exists
+
+- name: Extract Eclipse to apps directory
+  win_unzip:
+    src: "{{ temp_dir }}\\{{ eclipse_zip }}"
+    dest: "{{ program_files_dir }}"
+    creates: "{{ eclipse_install_dir }}"
+  when: not eclipse_installed.stat.exists
+
+- meta: flush_handlers
+
+- name: Verify Eclipse installation
+  win_stat:
+    path: "{{ eclipse_exe_path }}"
+  register: eclipse_stat
+
+- name: Fail if Eclipse executable not found
+  fail:
+    msg: >
+      Eclipse installation failed.
+      Expected executable not found at:
+      {{ eclipse_install_dir }}\eclipse.exe
+  when: not eclipse_stat.stat.exists
+  

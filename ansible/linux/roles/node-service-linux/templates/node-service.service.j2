@@ -1,0 +1,17 @@
+[Unit]
+Description={{ service_description }}
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory={{ node_app_dir }}
+ExecStart={{ node_executable }} {{ node_script_path }}
+Restart=on-failure
+RestartSec={{ service_restart_delay }}
+StartLimitBurst={{ service_restart_attempts }}
+StandardOutput=append:{{ node_log_dir }}/stdout.log
+StandardError=append:{{ node_log_dir }}/stderr.log
+
+[Install]
+WantedBy=multi-user.target

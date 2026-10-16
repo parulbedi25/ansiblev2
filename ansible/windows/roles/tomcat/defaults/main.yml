@@ -1,0 +1,27 @@
+# defaults file for tomcat role
+
+# Visual C++ Redistributable 2015-2022
+vcredist_x64_url: "https://aka.ms/vs/17/release/VC_redist.x64.exe"
+vcredist_x86_url: "https://aka.ms/vs/17/release/VC_redist.x86.exe"
+
+# Tomcat 9.0 Configuration
+tomcat_version: "9.0.117"
+tomcat_major_version: "9"
+tomcat_zip: "apache-tomcat-{{ tomcat_version }}-windows-x64.zip"
+tomcat_url: "https://dlcdn.apache.org/tomcat/tomcat-{{ tomcat_major_version }}/v{{ tomcat_version }}/bin/{{ tomcat_zip }}"
+tomcat_install_dir: "D:\\QASIP\\Apps\\tomcat"
+
+# Use ONE consistent service name everywhere
+tomcat_service_name: "ApacheTomcat{{ tomcat_major_version }}"
+java_exe: "C:\\Program Files\\OpenJDK\\jdk8u402-b06\\bin\\java.exe"
+
+# Temporary download directory
+temp_dir: "D:\\temp"
+
+# Tomcat ports
+tomcat_http_port: "8080"
+tomcat_shutdown_port: "8005"
+tomcat_ajp_port: "8009"
+
+# Service configuration
+tomcat_service_startup: "auto"

@@ -1,0 +1,141 @@
+---
+# tasks file for roles/tomcat-linux
+- name: Check if Tomcat service is running
+  systemd:
+    name: tomcat
+  register: tomcat_service_check
+  failed_when: false
+
+- name: Display Tomcat status
+  debug:
+    msg: "Tomcat service is {{ tomcat_service_check.status.ActiveState | default('not running') }}"
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Install required packages
+  apt:
+    name:
+      - build-essential
+      - "openjdk-{{ java_version }}-jdk"
+      - wget
+      - tar
+    state: present
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Verify Java installation
+  command: java -version
+  register: java_check
+  changed_when: false
+  failed_when: false
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- debug:
+    msg: "Java version: {{ java_check.stderr_lines | join('\n') }}"
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Download Tomcat {{ tomcat_version }} archive
+  get_url:
+    url: "{{ tomcat_url }}"
+    dest: "/tmp/{{ tomcat_archive }}"
+    mode: '0644'
+    timeout: 300
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Create Tomcat installation directory
+  file:
+    path: /opt
+    state: directory
+    mode: '0755'
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Extract Tomcat archive
+  unarchive:
+    src: "/tmp/{{ tomcat_archive }}"
+    dest: /opt
+    remote_src: yes
+    creates: "{{ tomcat_install_dir }}"
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Create Tomcat symlink
+  file:
+    src: "{{ tomcat_install_dir }}"
+    dest: "{{ tomcat_home }}"
+    state: link
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Create Tomcat systemd service file
+  copy:
+    dest: /etc/systemd/system/tomcat.service
+    content: |
+      [Unit]
+      Description=Apache Tomcat Web Application Container
+      After=network.target
+
+      [Service]
+      Type=forking
+      User=root
+      Group=root
+      Environment="JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64"
+      Environment="CATALINA_PID={{ tomcat_home }}/temp/tomcat.pid"
+      Environment="CATALINA_HOME={{ tomcat_home }}"
+      Environment="CATALINA_BASE={{ tomcat_home }}"
+      Environment="JAVA_OPTS=-Djava.awt.headless=true -Djava.security.egd=file:/dev/./urandom"
+      PIDFile={{ tomcat_home }}/temp/tomcat.pid
+
+      ExecStart={{ tomcat_home }}/bin/startup.sh
+      ExecStop={{ tomcat_home }}/bin/shutdown.sh
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Enable Tomcat service
+  systemd:
+    name: tomcat
+    enabled: yes
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Start Tomcat service
+  systemd:
+    name: tomcat
+    state: started
+  when: tomcat_service_check.status.ActiveState != "active"
+
+- name: Wait for Tomcat to start
+  wait_for:
+    port: 8080
+    timeout: 60
+
+- name: Verify Tomcat installation
+  uri:
+    url: http://localhost:8080
+    method: GET
+    status_code: 200
+  register: tomcat_check
+  failed_when: false
+
+- debug:
+    msg: "Tomcat HTTP check: {{ tomcat_check.status == 200 | ternary('Tomcat is running', 'Tomcat not responding') }}"
+
+- name: Check Tomcat service status
+  systemd:
+    name: tomcat
+  register: tomcat_service
+
+- debug:
+    msg: "Tomcat service status: {{ tomcat_service.status.ActiveState }}"
+
+- name: Clean up downloaded archive
+  file:
+    path: "/tmp/{{ tomcat_archive }}"
+    state: absent

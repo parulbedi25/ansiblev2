@@ -1,0 +1,1035 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: '',
+            description: 'Jenkins project agent label where this pipeline will run (format: project-env-ip, eg: copper-dev-10.10.3.150)'
+        )
+        string(
+            name: 'PROJECT_BRANCH',
+            defaultValue: '',
+            description: 'Project source code branch to checkout for build/deployment eg: qasip_devops'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+    }
+
+    environment {
+        PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+        NEXUS_REPO           = 'atms-modules'
+        VERSION              = '1.0.0'
+        BUILD_NUMBER         = "${env.BUILD_NUMBER}"
+        WAR_VERSION          = "1.0.0-${env.BUILD_NUMBER}"
+        DIST_VERSION         = "1.0.0-${env.BUILD_NUMBER}"
+        BASE_DEPLOY_DIR      = '/opt/deploys'
+        DEPLOY_DIR           = "${env.WORKSPACE}/${PROJECT_NAME}-code"
+        REPO_BASE_DIR        = "${env.WORKSPACE}/${PROJECT_NAME}-code"
+        JAVA_REPO            = 'git@10.10.1.68:andes/atms-app.git'
+        NODE_REPO            = 'git@10.10.1.68:andes/atms-node-microservice.git'
+        UI_REPO              = 'git@10.10.1.68:andes/atms-ui.git'
+        PYTHON_REPO          = 'git@10.10.1.68:AI/AI.git'
+        GIT_CREDENTIALS_ID   = 'jenkins-gitlab-118'
+        GRADLE_HOME          = '/opt/gradle-2.1'
+        GRADLE_PROJECT_DIR   = "${DEPLOY_DIR}/atms-app"
+        WAR_BUILD_DIR        = "${DEPLOY_DIR}/atms-app/atms-web/build/libs"
+        SPRING_PROFILE       = 'local'
+        ANSIBLE_OS           = "linux"
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+            steps {
+                script {
+
+                    env.AGENT_LABEL = params.PROJECT_TARGET_MACHINE?.trim()?.toLowerCase()
+                    env.BRANCH_NAME = params.PROJECT_BRANCH?.trim()
+
+                    def missing = []
+                    def formatErrors = []
+                    def notificationEmails = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+                    if (!env.AGENT_LABEL) missing << "PROJECT_TARGET_MACHINE"
+                    if (!env.BRANCH_NAME) missing << "PROJECT_BRANCH"
+                    if (!notificationEmails) {
+                        missing << "NOTIFICATION_EMAILS"
+                    }
+                    // -----------------------------
+                    // Validate NOTIFICATION_EMAILS
+                    // -----------------------------
+                    if (notificationEmails) {
+
+                        def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+                        def emailList = notificationEmails
+                                            .split(',')
+                                            .collect { it.trim() }
+                                            .findAll { it }
+
+                        // Check duplicates
+                        if (emailList.size() != emailList.unique().size()) {
+                            formatErrors << "Duplicate email addresses found in NOTIFICATION_EMAILS"
+                        }
+
+                        // Validate format
+                        for (email in emailList) {
+                            if (!(email ==~ emailRegex)) {
+                                formatErrors << "Invalid email format detected: ${email}"
+                            }
+                        }
+                    }
+
+
+
+
+                    if (missing || formatErrors) {
+                        error """
+BUILD FAILED ❌
+Missing required parameters:
+${missing.join('\n')}
+${formatErrors ? "Format Errors:\n${formatErrors.join('\n')}\n" : ""}
+
+Expected email format:
+user1@qasource.com, user2@qasource.com
+"""
+                    }
+
+                    echo "Parameters validated successfully ✅"
+                    echo "Agent -> ${env.AGENT_LABEL}"
+                    echo "Branch -> ${env.BRANCH_NAME}"
+                    echo "Notification Emails → ${notificationEmails}"
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 0: Fetch SSH keys from Nexus for Git
+        // =============================================
+        stage('Setup SSH Keys from Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    sh '''
+                        set -e
+                        echo "========================================"
+                        echo "Setting up SSH Keys from Nexus"
+                        echo "========================================"
+
+                        export SSH_DIR="$HOME/.ssh"
+                        mkdir -p "$SSH_DIR"
+                        chmod 700 "$SSH_DIR"
+
+                        PYTHON_BIN="$(command -v python3 || command -v python || true)"
+                        if [ -z "$PYTHON_BIN" ]; then
+                            echo "ERROR: python3/python not found; required to fetch SSH keys from Nexus"
+                            exit 1
+                        fi
+
+                        "$PYTHON_BIN" - <<'PY'
+import base64
+import json
+import os
+import sys
+import urllib.request
+
+nexus_url = os.environ.get("NEXUS_URL")
+repo = os.environ.get("NEXUS_REPO")
+user = os.environ.get("NEXUS_USER")
+password = os.environ.get("NEXUS_PASSWORD")
+ssh_dir = os.environ.get("SSH_DIR")
+
+if not all([nexus_url, repo, user, password, ssh_dir]):
+    sys.exit("ERROR: Missing required environment variables for Nexus download")
+
+auth = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("utf-8")
+headers = {"Authorization": f"Basic {auth}"}
+
+urls = []
+token = None
+while True:
+    uri = f"{nexus_url}/service/rest/v1/components?repository={repo}"
+    if token:
+        uri = f"{uri}&continuationToken={token}"
+    req = urllib.request.Request(uri, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        data = json.load(resp)
+    for item in data.get("items", []):
+        for asset in item.get("assets", []):
+            url = asset.get("downloadUrl", "")
+            if "ssh-key" in url:
+                urls.append(url)
+    token = data.get("continuationToken")
+    if not token:
+        break
+
+print(f"Found {len(urls)} SSH key file(s)")
+for url in urls:
+    filename = url.split("/")[-1]
+    out_path = os.path.join(ssh_dir, filename)
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req) as resp, open(out_path, "wb") as f:
+        f.write(resp.read())
+    print(f"Downloaded: {filename}")
+
+print("SSH keys setup complete.")
+PY
+
+                        chmod 600 "$SSH_DIR"/* 2>/dev/null || true
+
+                        echo
+                        echo "SSH key files in $SSH_DIR:"
+                        ls -1 "$SSH_DIR" || true
+                        echo "========================================"
+                    '''
+                }
+            }
+        }
+
+        stage('Download Common Scripts from Nexus') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    sh '''
+        set -e
+        echo "========================================"
+        echo "Downloading Scripts from Nexus (script folder)"
+        echo "========================================"
+
+        export SCRIPT_DIR="/home/$USER/script"
+
+        echo "Preparing script directory: $SCRIPT_DIR"
+
+        if [ -d "$SCRIPT_DIR" ]; then
+            echo "Directory exists. Removing old contents..."
+            rm -rf "$SCRIPT_DIR"/*
+        else
+            echo "Directory does not exist. Creating..."
+            mkdir -p "$SCRIPT_DIR"
+        fi
+
+        PYTHON_BIN="$(command -v python3 || command -v python || true)"
+        if [ -z "$PYTHON_BIN" ]; then
+            echo "ERROR: python3/python not found"
+            exit 1
+        fi
+
+        "$PYTHON_BIN" - <<'PY'
+import base64
+import json
+import os
+import sys
+import urllib.request
+
+nexus_url = os.environ.get("NEXUS_URL")
+repo = os.environ.get("NEXUS_REPO")
+user = os.environ.get("NEXUS_USER")
+password = os.environ.get("NEXUS_PASSWORD")
+script_dir = os.environ.get("SCRIPT_DIR")
+
+if not all([nexus_url, repo, user, password, script_dir]):
+    sys.exit("ERROR: Missing required environment variables")
+
+auth = base64.b64encode(f"{user}:{password}".encode()).decode()
+headers = {"Authorization": f"Basic {auth}"}
+
+urls = []
+token = None
+
+while True:
+    uri = f"{nexus_url}/service/rest/v1/components?repository={repo}"
+    if token:
+        uri += f"&continuationToken={token}"
+
+    req = urllib.request.Request(uri, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        data = json.load(resp)
+
+    for item in data.get("items", []):
+        for asset in item.get("assets", []):
+            url = asset.get("downloadUrl", "")
+            if "script" in url.lower() and (url.lower().endswith(".js") or url.lower().endswith(".json")):
+                urls.append(url)
+
+    token = data.get("continuationToken")
+    if not token:
+        break
+
+if not urls:
+    sys.exit("ERROR: No script files found")
+
+print(f"Found {len(urls)} script file(s)")
+
+for url in urls:
+    filename = url.split("/")[-1]
+    output_path = os.path.join(script_dir, filename)
+
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req) as resp, open(output_path, "wb") as f:
+        f.write(resp.read())
+
+    print(f"Downloaded: {filename}")
+
+print("Script download complete.")
+PY
+
+        echo
+        echo "Downloaded files:"
+        ls -l "$SCRIPT_DIR"
+        echo "========================================"
+        '''
+                }
+            }
+        }
+
+        stage('Install NPM Packages') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Installing Node Packages..."
+
+                    SCRIPT_DIR="/home/$USER/script"
+                    export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+
+                    if [ ! -f "$SCRIPT_DIR/package.json" ]; then
+                        echo "ERROR: package.json not found"
+                        exit 1
+                    fi
+
+                    cd "$SCRIPT_DIR"
+                    npm install
+
+                    echo "NPM install completed successfully."
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 0.5: Ensure Git is available on agent
+        // =============================================
+        stage('Validate Git Installation') {
+            steps {
+                sh '''
+                    set -e
+                    if command -v git >/dev/null 2>&1; then
+                        echo "Git found:"
+                        git --version
+                        exit 0
+                    fi
+
+                    echo "ERROR: git not found on the agent."
+                    echo "Please install git on the build agent image or ensure it is in PATH."
+                    exit 1
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 1: Clone latest code from all 4 repos
+        // =============================================
+        stage('Checkout Code from Repositories') {
+            steps {
+                script {
+                    // Generate date-based release version
+                    env.BUILD_DATE = new Date().format('dd-MM-yyyy')
+                    env.RELEASE_VERSION = "${env.BUILD_DATE}-v${VERSION}-${env.BUILD_NUMBER}"
+
+                    echo "========================================="
+                    echo "Checking out code from 4 repositories"
+                    echo "Branch: ${params.PROJECT_BRANCH}"
+                    echo "Release Version: ${env.RELEASE_VERSION}"
+                    echo "Nexus Path: ${PROJECT_NAME}/${env.RELEASE_VERSION}/"
+                    echo "========================================="
+
+                    sh """
+                        mkdir -p "${REPO_BASE_DIR}"
+                    """
+
+                    def repositories = [
+                        [name: 'AI-Python', url: 'git@10.10.1.68:AI/AI.git', type: 'Python'],
+                        [name: 'atms-app', url: 'git@10.10.1.68:andes/atms-app.git', type: 'Java'],
+                        [name: 'atms-node-microservice', url: 'git@10.10.1.68:andes/atms-node-microservice.git', type: 'Node.js'],
+                        [name: 'atms-ui', url: 'git@10.10.1.68:andes/atms-ui.git', type: 'UI', branch: 'Resolve_Build_Automation']
+                    ]
+
+                    repositories.each { repo ->
+                        def branchName = repo.branch ?: params.PROJECT_BRANCH
+                        echo "Checking out: ${repo.name} (${repo.type}) - Branch: ${branchName}"
+                        dir("${REPO_BASE_DIR}/${repo.name}") {
+                            checkout([
+                                $class: 'GitSCM',
+                                branches: [[name: "*/${branchName}"]],
+                                userRemoteConfigs: [[
+                                    url: repo.url,
+                                    credentialsId: env.GIT_CREDENTIALS_ID
+                                ]],
+                                extensions: [[
+                                    $class: 'CloneOption',
+                                    shallow: true,
+                                    depth: 1
+                                ]]
+                            ])
+                        }
+                        echo "${repo.name} checked out successfully from branch: ${branchName}"
+                    }
+
+                    // Clean up @tmp folders created by Jenkins checkout
+                    sh '''
+                        set -e
+                        echo "========================================"
+                        echo "Cleaning up @tmp folders"
+                        echo "========================================"
+                        find "$REPO_BASE_DIR" -maxdepth 1 -type d -name "*@tmp" -exec rm -rf {} +
+                        echo "@tmp cleanup done."
+                    '''
+
+                    sh '''
+                        echo
+                        echo "========================================"
+                        echo "Repository Checkout Summary"
+                        echo "========================================"
+                        echo "Branch: $PROJECT_BRANCH"
+                        echo "Location: $REPO_BASE_DIR"
+                        echo
+                        ls -1 "$REPO_BASE_DIR"
+                        echo
+                        echo "========================================"
+                    '''
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 2: Install Node dependencies via npm
+        // =============================================
+        stage('Install Node Dependencies') {
+        steps {
+            sh '''
+                set -e
+
+                echo "========================================"
+                echo "Installing Node dependencies"
+                echo "========================================"
+
+                export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+
+                echo "Current User:"
+                whoami
+
+                echo "Node location:"
+                which node
+
+                echo "NPM location:"
+                which npm
+
+                cd "$REPO_BASE_DIR/atms-node-microservice"
+
+                node -v
+                npm -v
+
+                echo "Running npm install..."
+                npm install
+
+                if [ ! -d "node_modules" ]; then
+                    echo "ERROR: node_modules folder not found"
+                    exit 1
+                fi
+
+                echo "npm install completed successfully."
+            '''
+        }
+    }
+        // =============================================
+        // STAGE 3: Prepare configs and inject credentials
+        //          for Python AI and Java atms-app
+        // =============================================
+        stage('Prepare Configs and Inject Credentials') {
+            steps {
+                // Step 1: Rename .env.example to .env
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Renaming .env.example to .env"
+                    echo "========================================"
+
+                    cd "$REPO_BASE_DIR/AI-Python/test_script_generator"
+
+                    if [ -f ".env.example" ]; then
+                        rm -f ".env"
+                        mv ".env.example" ".env"
+                        echo ".env.example renamed to .env successfully"
+                    else
+                        echo "ERROR: .env.example not found in AI-Python/test_script_generator"
+                        exit 1
+                    fi
+                '''
+
+                // Step 2: Inject Python credentials into .env
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'python-db-credentials',
+                        usernameVariable: 'COUCH_USER',
+                        passwordVariable: 'COUCH_PASS'
+                    ),
+                    string(
+                        credentialsId: 'openai-api-key',
+                        variable: 'OPENAI_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+                        echo "========================================"
+                        echo "Injecting Python AI credentials into .env"
+                        echo "========================================"
+
+                        export ENV_FILE="$REPO_BASE_DIR/AI-Python/test_script_generator/.env"
+
+                        if [ ! -f "$ENV_FILE" ]; then
+                            echo "ERROR: .env file not found at $ENV_FILE"
+                            exit 1
+                        fi
+
+                        PYTHON_BIN="$(command -v python3 || command -v python || true)"
+                        if [ -z "$PYTHON_BIN" ]; then
+                            echo "ERROR: python3/python not found; required to update .env"
+                            exit 1
+                        fi
+
+                        "$PYTHON_BIN" - <<'PY'
+import os
+import re
+from pathlib import Path
+
+env_file = Path(os.environ["ENV_FILE"])
+content = env_file.read_text()
+content = re.sub(r'COUCH_DB_USER\\s*=\\s*.*', f'COUCH_DB_USER = "{os.environ["COUCH_USER"]}"', content)
+content = re.sub(r'COUCH_DB_PASSWORD\\s*=\\s*.*', f'COUCH_DB_PASSWORD = "{os.environ["COUCH_PASS"]}"', content)
+content = re.sub(r'OPENAI_API_KEY\\s*=\\s*.*', f'OPENAI_API_KEY={os.environ["OPENAI_KEY"]}', content)
+env_file.write_text(content)
+PY
+
+                        echo "Python AI credentials injected successfully."
+                    '''
+                }
+
+                // Step 3: Inject Java DB credentials into settings-local.properties
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'java-db-credentials',
+                        usernameVariable: 'JDBC_USER',
+                        passwordVariable: 'JDBC_PASS'
+                    )
+                ]) {
+                    sh '''
+                        set -e
+                        echo "========================================"
+                        echo "Injecting Java DB credentials into settings-local.properties"
+                        echo "========================================"
+
+                        export PROPS_FILE="$REPO_BASE_DIR/atms-app/atms-web/src/main/resources/settings-local.properties"
+
+                        if [ ! -f "$PROPS_FILE" ]; then
+                            echo "ERROR: settings-local.properties not found at $PROPS_FILE"
+                            exit 1
+                        fi
+
+                        PYTHON_BIN="$(command -v python3 || command -v python || true)"
+                        if [ -z "$PYTHON_BIN" ]; then
+                            echo "ERROR: python3/python not found; required to update settings-local.properties"
+                            exit 1
+                        fi
+
+                        "$PYTHON_BIN" - <<'PY'
+import os
+import re
+from pathlib import Path
+
+props_file = Path(os.environ["PROPS_FILE"])
+content = props_file.read_text()
+content = re.sub(r'jdbc\\.username\\s*=\\s*.*', f'jdbc.username = {os.environ["JDBC_USER"]}', content)
+content = re.sub(r'jdbc\\.password\\s*=\\s*.*', f'jdbc.password = {os.environ["JDBC_PASS"]}', content)
+props_file.write_text(content)
+PY
+
+                        echo "Java DB credentials injected successfully."
+                    '''
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 4: Zip and upload source code to Nexus
+        //          (node-microservice includes node_modules)
+        // =============================================
+        stage('Upload Source Code to Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        // Upload atms-node-microservice source (WITH node_modules)
+                        sh '''
+                            set -e
+                            echo "========================================"
+                            echo "Zipping atms-node-microservice (with node_modules)"
+                            echo "========================================"
+
+                            if ! command -v zip >/dev/null 2>&1; then
+                                echo "ERROR: zip command not found"
+                                exit 1
+                            fi
+
+                            cd "$REPO_BASE_DIR/atms-node-microservice"
+
+                            echo "Creating archive: atms-node-microservice.zip"
+                            rm -f "$REPO_BASE_DIR/atms-node-microservice.zip"
+                            zip -r "$REPO_BASE_DIR/atms-node-microservice.zip" .
+
+                            echo "Uploading atms-node-microservice to Nexus..."
+                            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$NEXUS_USER:$NEXUS_PASSWORD" \
+                              --upload-file "$REPO_BASE_DIR/atms-node-microservice.zip" \
+                              "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/atms-node-microservice/atms-node-microservice.zip")
+
+                            echo "HTTP Response Code: $HTTP_CODE"
+
+                            if [ "$HTTP_CODE" = "201" ]; then
+                                echo "atms-node-microservice uploaded successfully!"
+                                echo "Location: $NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/atms-node-microservice/"
+                            else
+                                echo "ERROR: Upload failed with HTTP code: $HTTP_CODE"
+                                exit 1
+                            fi
+
+                            rm -f "$REPO_BASE_DIR/atms-node-microservice.zip"
+                        '''
+
+                        // Upload AI-Python source
+                        sh '''
+                            set -e
+                            echo "========================================"
+                            echo "Zipping AI-Python source code"
+                            echo "========================================"
+
+                            if ! command -v zip >/dev/null 2>&1; then
+                                echo "ERROR: zip command not found"
+                                exit 1
+                            fi
+
+                            cd "$REPO_BASE_DIR/AI-Python"
+
+                            echo "Creating archive: AI-Python.zip"
+                            rm -f "$REPO_BASE_DIR/AI-Python.zip"
+                            zip -r "$REPO_BASE_DIR/AI-Python.zip" .
+
+                            echo "Uploading AI-Python source to Nexus..."
+                            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$NEXUS_USER:$NEXUS_PASSWORD" \
+                              --upload-file "$REPO_BASE_DIR/AI-Python.zip" \
+                              "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/AI-Python/AI-Python.zip")
+
+                            echo "HTTP Response Code: $HTTP_CODE"
+
+                            if [ "$HTTP_CODE" = "201" ]; then
+                                echo "AI-Python source uploaded successfully!"
+                                echo "Location: $NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/AI-Python/"
+                            else
+                                echo "ERROR: Upload failed with HTTP code: $HTTP_CODE"
+                                exit 1
+                            fi
+
+                            rm -f "$REPO_BASE_DIR/AI-Python.zip"
+                        '''
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 4: Install UI dependencies via npm & bower
+        // =============================================
+        stage('Install UI Dependencies') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "========================================"
+                    echo "Installing atms-ui dependencies"
+                    echo "========================================"
+
+                    export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+
+                    cd "$REPO_BASE_DIR/atms-ui"
+
+                    echo "[1/3] Running npm install..."
+                    npm install
+
+                    echo
+                    echo "[2/3] Ensuring bower is available locally..."
+                    if ! npx --no-install bower --version >/dev/null 2>&1; then
+                        echo "Installing bower locally..."
+                        npm install bower --save-dev
+                    else
+                        echo "bower already available locally."
+                    fi
+
+                    echo
+                    echo "[3/3] Running bower install..."
+                    npx bower install --allow-root
+
+                    echo
+                    echo "All atms-ui dependencies installed."
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 5: Clean old WAR files before building
+        // =============================================
+        stage('Clean Old Build Artifacts') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Cleaning Old Build Artifacts"
+                    echo "========================================"
+
+                    if [ -d "$WAR_BUILD_DIR" ]; then
+                        echo "Found existing build directory: $WAR_BUILD_DIR"
+                        echo "Deleting old WAR files..."
+                        rm -f "$WAR_BUILD_DIR"/*.war 2>/dev/null || true
+                        echo "Old WAR files cleaned."
+                    else
+                        echo "No existing build directory found. Skipping cleanup."
+                    fi
+
+                    echo "Cleanup completed successfully!"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 6: Build Java WAR from cloned atms-app
+        // =============================================
+        stage('Build Java Application') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Building Java Application"
+                    echo "Build Number: $BUILD_NUMBER"
+                    echo "WAR Version: $WAR_VERSION"
+                    echo "========================================"
+
+                    export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+                    export PATH=$JAVA_HOME/bin:$PATH
+                    if [ -n "${GRADLE_HOME:-}" ] && [ -d "$GRADLE_HOME" ]; then
+                        export PATH="$GRADLE_HOME/bin:$PATH"
+                    fi
+
+                    if [ -n "${JAVA_HOME:-}" ] && [ -d "$JAVA_HOME" ]; then
+                        export PATH="$JAVA_HOME/bin:$PATH"
+                    fi
+
+                    echo "========================================"
+                    echo "Navigating to project directory: $GRADLE_PROJECT_DIR"
+                    cd "$GRADLE_PROJECT_DIR"
+
+                    echo "Current directory:"
+                    pwd
+                    echo
+
+                    if [ ! -f "build.gradle" ]; then
+                        echo "ERROR: build.gradle not found in current directory"
+                        echo "Directory contents:"
+                        ls -la
+                        exit 1
+                    fi
+
+                    echo "Found build.gradle"
+                    echo
+
+
+                    echo "GRADLE_HOME=${GRADLE_HOME:-not set}"
+                    echo "JAVA_HOME=${JAVA_HOME:-not set}"
+                    echo
+
+                    JAVA_PKG="openjdk-8-jdk"
+                    if grep -Eq 'sourceCompatibility\\s*=?\\s*1\\.8|JavaVersion\\.VERSION_1_8' build.gradle; then
+                        JAVA_PKG="openjdk-8-jdk"
+                    elif grep -Eq 'sourceCompatibility\\s*=?\\s*11|JavaVersion\\.VERSION_11' build.gradle; then
+                        JAVA_PKG="openjdk-11-jdk"
+                    elif grep -Eq 'sourceCompatibility\\s*=?\\s*17|JavaVersion\\.VERSION_17' build.gradle; then
+                        JAVA_PKG="openjdk-17-jdk"
+                    fi
+
+                    echo "Checking Java version..."
+                    if ! command -v java >/dev/null 2>&1; then
+                        echo "ERROR: Java not found. Please install $JAVA_PKG on the agent."
+                        exit 1
+                    fi
+                    java -version
+
+                    if [ -z "${JAVA_HOME:-}" ] && command -v java >/dev/null 2>&1; then
+                        JAVA_BIN="$(command -v java)"
+                        JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$JAVA_BIN")")")"
+                        export JAVA_HOME
+                    fi
+
+                    GRADLE_CMD="gradle"
+    
+                    echo
+                    echo "Checking Gradle version..."
+                    if [ "$GRADLE_CMD" = "gradle" ] && ! command -v gradle >/dev/null 2>&1; then
+                        echo "ERROR: Gradle not found. Please install gradle on the agent."
+                        exit 1
+                    fi
+                    "$GRADLE_CMD" -v
+
+                    echo
+                    echo "========================================"
+                    echo "Starting Gradle Build Process"
+                    echo "Running: $GRADLE_CMD clean war -Dspring.profiles.active=$SPRING_PROFILE"
+                    echo "========================================"
+                    echo
+
+                    "$GRADLE_CMD" clean war -Dspring.profiles.active="$SPRING_PROFILE"
+
+                    echo
+                    echo "========================================"
+                    echo "Build completed successfully!"
+                    echo "========================================"
+                    echo
+
+                    if ! ls "$WAR_BUILD_DIR"/*.war >/dev/null 2>&1; then
+                        echo "ERROR: No WAR file found in $WAR_BUILD_DIR"
+                        exit 1
+                    fi
+
+                    echo "WAR file created:"
+                    ls -1 "$WAR_BUILD_DIR"/*.war
+                    echo
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 7: Upload built WAR to Nexus
+        // =============================================
+        stage('Upload WAR to Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        def uploadStatus = sh(script: '''
+                            set -e
+                            echo "========================================"
+                            echo "Uploading WAR to Nexus (Version: $WAR_VERSION)"
+                            echo "========================================"
+
+                            cd "$WAR_BUILD_DIR"
+
+                            export WAR_FILE="$(ls -1 *.war | head -n 1 || true)"
+
+                            if [ -z "$WAR_FILE" ]; then
+                                echo "ERROR: No WAR file found"
+                                exit 1
+                            fi
+
+                            echo "Found WAR file: $WAR_FILE"
+                            echo "Uploading as ROOT.war to: $NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/atms-app/ROOT.war"
+                            echo
+
+                            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$NEXUS_USER:$NEXUS_PASSWORD" \
+                              --upload-file "$WAR_FILE" \
+                              "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/atms-app/ROOT.war")
+
+                            echo "HTTP Response Code: $HTTP_CODE"
+
+                            if [ "$HTTP_CODE" = "201" ]; then
+                                echo "Upload successful!"
+                                echo "Location: $NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/linux/atms-app/"
+                                exit 0
+                            else
+                                echo "Upload failed with HTTP code: $HTTP_CODE"
+                                exit 1
+                            fi
+                        ''', returnStatus: true)
+
+                        if (uploadStatus != 0) {
+                            error("Failed to upload WAR file to Nexus")
+                        }
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 8: Build atms-ui dist and upload to Nexus
+        // =============================================
+        stage('Build and Upload atms-ui dist') {
+            steps {
+                script {
+                    sh '''
+                        set -e
+                        echo "========================================"
+                        echo "Building atms-ui dist (Version: $DIST_VERSION)"
+                        echo "========================================"
+
+                        export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+                        
+                        cd "$REPO_BASE_DIR/atms-ui"
+
+                        if [ -d "dist" ]; then
+                            echo "Cleaning old dist folder..."
+                            rm -rf dist
+                        fi
+
+                        echo "Installing npm dependencies..."
+                        npm install
+
+                        echo "Running gulp build..."
+                        npx gulp build --api_host http://localhost:8080
+
+                        if [ ! -d "dist" ]; then
+                            echo "ERROR: dist folder not found after build"
+                            exit 1
+                        fi
+
+                        echo "Build completed successfully!"
+                    '''
+
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        def uploadDistStatus = sh(script: '''
+                            set -e
+                            echo "========================================"
+                            echo "Uploading atms-ui dist to Nexus"
+                            echo "========================================"
+
+                            cd "$REPO_BASE_DIR/atms-ui"
+
+                            if [ ! -d "dist" ]; then
+                                echo "ERROR: dist folder not found"
+                                exit 1
+                            fi
+
+                            echo "Creating archive: atms-ui-dist.tar.gz"
+                            tar -czf atms-ui-dist.tar.gz -C dist .
+
+                            echo "Uploading to: $NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/atms-ui/"
+                            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$NEXUS_USER:$NEXUS_PASSWORD" \
+                              --upload-file "atms-ui-dist.tar.gz" \
+                              "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/atms-ui/atms-ui-dist.tar.gz")
+
+                            echo "HTTP Response Code: $HTTP_CODE"
+
+                            if [ "$HTTP_CODE" = "201" ]; then
+                                echo "Upload successful!"
+                                echo "Location: $NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$RELEASE_VERSION/atms-ui/"
+                                rm -f atms-ui-dist.tar.gz
+                                exit 0
+                            else
+                                echo "Upload failed with HTTP code: $HTTP_CODE"
+                                exit 1
+                            fi
+                        ''', returnStatus: true)
+
+                        if (uploadDistStatus != 0) {
+                            error("Failed to upload atms-ui dist folder to Nexus")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    echo """
+        ========================================
+        BUILD & DEPLOY SUCCESSFUL
+        ========================================
+        All components processed successfully:
+        - Git Repos cloned from branch: ${params.PROJECT_BRANCH}
+        - Release Version: ${RELEASE_VERSION}
+        - Nexus Base Path: ${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/${RELEASE_VERSION}/
+        - atms-node-microservice: uploaded (with node_modules)
+        - AI-Python: uploaded
+        - atms-app: ROOT.war uploaded
+        - atms-ui: dist uploaded
+        ========================================
+        """
+                def executionTime = currentBuild.durationString.replace(' and counting', '')
+                sh """
+                export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+                node /home/$USER/script/sendBuildEmail.js --smtpServer="${SMTP_SERVER}" --smtpUser="${SMTP_USER}" --smtpPassword="${SMTP_PASSWORD}" --smtpPort="${SMTP_PORT}" --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="${params.NOTIFICATION_EMAILS}" --projectName="${PROJECT_NAME}" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType="${ANSIBLE_OS}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                """
+
+                // sleep(time: 4, unit: 'SECONDS')
+
+                // sh """
+                // export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+                // node /home/$USER/script/sendBuildEmail-devops.js --smtpServer="${SMTP_SERVER}" --smtpUser="${SMTP_USER}" --smtpPassword="${SMTP_PASSWORD}" --smtpPort="${SMTP_PORT}" --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --projectName="${PROJECT_NAME}" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType="${ANSIBLE_OS}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                // """
+                    }
+                }
+        }
+
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    echo """
+        ========================================
+        BUILD & DEPLOY FAILED
+        ========================================
+        Please check the logs above for errors.
+        ========================================
+        """
+                // def executionTime = currentBuild.durationString.replace(' and counting', '')
+                // sh """
+                // export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+                // node /home/$USER/script/sendBuildEmail-devops.js --smtpServer="${SMTP_SERVER}" --smtpUser="${SMTP_USER}" --smtpPassword="${SMTP_PASSWORD}" --smtpPort="${SMTP_PORT}" --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --projectName="${PROJECT_NAME}" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType="${ANSIBLE_OS}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                // """
+                    }
+                }
+            }
+    }
+}

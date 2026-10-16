@@ -1,0 +1,26 @@
+---
+galaxy_info:
+  author: your name
+  description: Install Gradle build tool from source on Ubuntu Linux systems
+  company: your company (optional)
+
+  license: GPL-2.0-or-later
+
+  min_ansible_version: 2.9
+
+  platforms:
+  - name: Ubuntu
+    versions:
+    - focal
+    - jammy
+    - noble
+
+  galaxy_tags:
+    - gradle
+    - build
+    - java
+    - development
+    - ubuntu
+    - linux
+
+dependencies: []

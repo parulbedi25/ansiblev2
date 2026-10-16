@@ -1,0 +1,5 @@
+---
+# defaults file for roles/java-linux
+java_versions: ["8", "17"]
+java_default_version: "8"
+java_home: "/usr/lib/jvm/java-{{ java_default_version }}-openjdk-amd64"

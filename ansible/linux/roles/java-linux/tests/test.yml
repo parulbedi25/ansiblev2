@@ -1,0 +1,40 @@
+---
+- name: Test Java Multi-Version Installation
+  hosts: localhost
+  remote_user: root
+  become: yes
+
+  vars:
+    java_versions: ["8", "17"]
+    java_default_version: "8"
+
+  roles:
+    - java-linux
+
+  post_tasks:
+    - name: Verify multiple Java versions are available
+      command: ls /usr/lib/jvm/
+      register: jvm_list
+      changed_when: false
+
+    - name: Display available JVM installations
+      debug:
+        msg: "Available JVMs: {{ jvm_list.stdout_lines | join(', ') }}"
+
+    - name: Test Java 8 version
+      command: /usr/lib/jvm/java-8-openjdk-amd64/bin/java -version
+      register: java8_check
+      changed_when: false
+      failed_when: false
+
+    - name: Test Java 17 version
+      command: /usr/lib/jvm/java-17-openjdk-amd64/bin/java -version
+      register: java17_check
+      changed_when: false
+      failed_when: false
+
+    - name: Display Java version results
+      debug:
+        msg: |
+          Java 8: {{ java8_check.stderr_lines | join('\n') if java8_check.rc == 0 else 'Not found' }}
+          Java 17: {{ java17_check.stderr_lines | join('\n') if java17_check.rc == 0 else 'Not found' }}

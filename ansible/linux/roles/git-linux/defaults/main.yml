@@ -1,0 +1,3 @@
+---
+# defaults file for roles/git-linux
+git_version: "latest"

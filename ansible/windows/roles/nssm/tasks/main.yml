@@ -1,0 +1,12 @@
+---
+# tasks file for nssm
+- name: Install NSSM using Chocolatey
+  win_chocolatey:
+    name: nssm
+    state: present
+
+- name: Verify NSSM installation
+  win_command: nssm version
+  register: nssm_version_output
+  changed_when: false
+  failed_when: nssm_version_output.rc != 0

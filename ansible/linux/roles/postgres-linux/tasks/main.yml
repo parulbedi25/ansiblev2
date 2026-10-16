@@ -1,0 +1,237 @@
+---
+# tasks file for roles/postgres-linux
+# PostgreSQL 10.17 Installation from Source (matching bash script)
+
+- name: Check if PostgreSQL is already running
+  command: "{{ postgresql_install_dir }}/bin/pg_ctl status -D {{ postgresql_data_dir }}"
+  register: pg_status_check
+  failed_when: false
+  changed_when: false
+
+- name: Display PostgreSQL status
+  debug:
+    msg: "PostgreSQL status check: {{ pg_status_check.stdout | default('not running') }}"
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: pg_status_check.rc != 0
+
+- name: Install build dependencies
+  apt:
+    name:
+      - build-essential
+      - libreadline-dev
+      - zlib1g-dev
+      - flex
+      - bison
+      - libxml2-dev
+      - libxslt-dev
+      - libssl-dev
+      - libxml2-utils
+      - xsltproc
+      - wget
+      - curl
+      - ca-certificates
+      - gnupg2
+      - lsof
+      - net-tools
+    state: present
+  when: pg_status_check.rc != 0
+
+- name: Download PostgreSQL {{ postgresql_version }} source
+  get_url:
+    url: "{{ postgresql_source_url }}"
+    dest: "/tmp/postgresql-{{ postgresql_version }}.tar.gz"
+    mode: '0644'
+    timeout: 300
+  when: pg_status_check.rc != 0
+
+- name: Extract PostgreSQL source
+  unarchive:
+    src: "/tmp/postgresql-{{ postgresql_version }}.tar.gz"
+    dest: "/tmp"
+    remote_src: yes
+  when: pg_status_check.rc != 0
+
+- name: Configure PostgreSQL build
+  command: "./configure --prefix={{ postgresql_install_dir }} --with-openssl --with-libxml --with-libxslt"
+  args:
+    chdir: "/tmp/postgresql-{{ postgresql_version }}"
+  when: pg_status_check.rc != 0
+
+- name: Compile PostgreSQL (this takes several minutes)
+  command: "make -j{{ ansible_processor_vcpus }}"
+  args:
+    chdir: "/tmp/postgresql-{{ postgresql_version }}"
+  when: pg_status_check.rc != 0
+
+- name: Install PostgreSQL
+  command: "make install"
+  args:
+    chdir: "/tmp/postgresql-{{ postgresql_version }}"
+  become: yes
+  when: pg_status_check.rc != 0
+
+- name: Install contrib modules
+  command: "make install"
+  args:
+    chdir: "/tmp/postgresql-{{ postgresql_version }}/contrib"
+  become: yes
+  when: pg_status_check.rc != 0
+
+- name: Clean up source files
+  file:
+    path: "/tmp/postgresql-{{ postgresql_version }}"
+    state: absent
+  when: pg_status_check.rc != 0
+
+- name: Create postgres user
+  user:
+    name: postgres
+    shell: /bin/bash
+    home: "/var/lib/postgresql"
+    system: yes
+    create_home: yes
+  when: pg_status_check.rc != 0
+
+- name: Create PostgreSQL directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0755'
+  loop:
+    - "{{ postgresql_data_dir }}"
+    - "{{ postgresql_log_dir }}"
+  when: pg_status_check.rc != 0
+
+- name: Clean up existing PostgreSQL data directory if PostgreSQL is not running
+  file:
+    path: "{{ postgresql_data_dir }}"
+    state: absent
+  when: pg_status_check.rc != 0
+
+- name: Recreate PostgreSQL data directory
+  file:
+    path: "{{ postgresql_data_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0755'
+  when: pg_status_check.rc != 0
+
+- name: Set up PostgreSQL environment variables
+  template:
+    src: postgresql.sh.j2
+    dest: /etc/profile.d/postgresql.sh
+    mode: '0644'
+  when: pg_status_check.rc != 0
+
+- name: Ensure en_US.UTF-8 locale is generated
+  locale_gen:
+    name: en_US.UTF-8
+    state: present
+  when: pg_status_check.rc != 0
+
+- name: Check if PostgreSQL cluster is already initialized
+  stat:
+    path: "{{ postgresql_data_dir }}/PG_VERSION"
+  register: pg_version_file
+
+- name: Force-clear data directory if not initialized by our binary
+  shell: "find {{ postgresql_data_dir }} -mindepth 1 -delete"
+  become: yes
+  when: pg_status_check.rc != 0 and pg_version_file.stat.exists == false
+
+- name: Initialize PostgreSQL database cluster
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/initdb -D {{ postgresql_data_dir }} --locale=en_US.UTF-8"
+  become: yes
+  when: pg_status_check.rc != 0 and not pg_version_file.stat.exists
+
+- name: Configure pg_hba.conf
+  template:
+    src: pg_hba.conf.j2
+    dest: "{{ postgresql_data_dir }}/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  when: pg_status_check.rc != 0
+
+- name: Configure postgresql.conf
+  template:
+    src: postgresql.conf.j2
+    dest: "{{ postgresql_data_dir }}/postgresql.conf"
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  when: pg_status_check.rc != 0
+
+- name: Start PostgreSQL service
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/pg_ctl start -D {{ postgresql_data_dir }} -l {{ postgresql_log_dir }}/postgresql.log"
+  become: yes
+  when: pg_status_check.rc != 0
+
+- name: Wait for PostgreSQL to start
+  pause:
+    seconds: 3
+
+- name: Check PostgreSQL service status
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/pg_ctl status -D {{ postgresql_data_dir }}"
+  become: yes
+  register: pg_status
+  changed_when: false
+
+- name: Display PostgreSQL status
+  debug:
+    msg: "PostgreSQL status: {{ pg_status.stdout }}"
+
+- name: Create database
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/createdb {{ postgresql_database }}"
+  become: yes
+  when: pg_status_check.rc != 0
+
+- name: Set postgres user password
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/psql -c \"ALTER USER {{ pg_superuser }} PASSWORD '{{ pg_superuser_password }}';\""
+  become: yes
+  when: pg_status_check.rc != 0
+
+- name: Create PostgreSQL required roles
+  command: >
+    sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/psql -d postgres
+    -c "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='{{ item }}') THEN CREATE ROLE {{ item }}; END IF; END $$;"
+  become: yes
+  loop: "{{ postgresql_roles }}"
+  when: pg_status_check.rc != 0
+
+- name: Verify PostgreSQL version
+  command: "{{ postgresql_install_dir }}/bin/psql --version"
+  register: pg_version
+  changed_when: false
+
+- name: Display PostgreSQL version
+  debug:
+    msg: "PostgreSQL version: {{ pg_version.stdout }}"
+
+- name: Create helper scripts
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: '0755'
+  loop:
+    - { src: 'postgres-start.j2', dest: '/usr/local/bin/postgres-start' }
+    - { src: 'postgres-stop.j2', dest: '/usr/local/bin/postgres-stop' }
+    - { src: 'postgres-status.j2', dest: '/usr/local/bin/postgres-status' }
+  when: pg_status_check.rc != 0
+
+- name: Test PostgreSQL connection
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/psql -d {{ postgresql_database }} -c 'SELECT version();'"
+  become: yes
+  register: pg_test
+  changed_when: false
+
+- name: Display connection test result
+  debug:
+    msg: "PostgreSQL connection test: {{ 'SUCCESS' if pg_test.rc == 0 else 'FAILED' }}"

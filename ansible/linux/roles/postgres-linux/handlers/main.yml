@@ -1,0 +1,17 @@
+---
+# handlers file for roles/postgres-linux
+- name: restart postgresql
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/pg_ctl restart -D {{ postgresql_data_dir }} -l {{ postgresql_log_dir }}/postgresql.log"
+  become: yes
+
+- name: reload postgresql
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/pg_ctl reload -D {{ postgresql_data_dir }}"
+  become: yes
+
+- name: start postgresql
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/pg_ctl start -D {{ postgresql_data_dir }} -l {{ postgresql_log_dir }}/postgresql.log"
+  become: yes
+
+- name: stop postgresql
+  command: "sudo -u postgres env HOME=/var/lib/postgresql {{ postgresql_install_dir }}/bin/pg_ctl stop -D {{ postgresql_data_dir }}"
+  become: yes

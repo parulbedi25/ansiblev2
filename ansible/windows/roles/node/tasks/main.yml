@@ -1,0 +1,57 @@
+---
+# tasks file for roles/node
+- name: Create temp directory
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+- name: Check if node.exe already exists
+  win_stat:
+    path: "{{ node_install_dir }}\\node.exe"
+  register: node_exe_check
+
+- name: Download Node.js {{ node_version }} MSI
+  win_get_url:
+    url: "{{ node_url }}"
+    dest: "{{ temp_dir }}\\{{ node_msi }}"
+
+- name: Uninstall existing Node.js if files are missing
+  win_package:
+    path: "{{ temp_dir }}\\{{ node_msi }}"
+    state: absent
+  when: not node_exe_check.stat.exists
+
+- name: Install Node.js {{ node_version }}
+  win_package:
+    path: "{{ temp_dir }}\\{{ node_msi }}"
+    arguments: /quiet
+    state: present
+
+- name: Ensure Node.js is in system PATH
+  win_path:
+    elements:
+      - "{{ node_install_dir }}"
+    scope: machine
+    state: present
+
+- name: Reset connection to refresh PATH
+  meta: reset_connection
+
+- name: Verify Node.js installation
+  win_command: node -v
+  register: node_verify
+  changed_when: false
+  failed_when: false
+
+- name: Display Node.js version
+  debug:
+    msg: "Node.js version: {{ node_verify.stdout | trim }}"
+  when: node_verify.rc == 0
+
+- name: Fail if Node.js is not installed
+  fail:
+    msg: >
+      Node.js is not installed or not available in PATH.
+      Please install Node.js before continuing.
+  when: node_verify.rc != 0
+  

@@ -1,0 +1,13 @@
+---
+openssh_manage_client: true
+openssh_manage_server: true
+
+openssh_client_capability_name: "OpenSSH.Client~~~~0.0.1.0"
+openssh_server_capability_name: "OpenSSH.Server~~~~0.0.1.0"
+
+openssh_server_service_name: "sshd"
+openssh_agent_service_name: "ssh-agent"
+openssh_server_port: 22
+openssh_firewall_rule_name: "OpenSSH-Server-In-TCP"
+
+openssh_bin_path: "C:\\Windows\\System32\\OpenSSH"

@@ -1,0 +1,181 @@
+---
+# tasks file for roles/redis
+- name: Ensure Chocolatey is installed
+  win_chocolatey:
+    name: chocolatey
+    state: present
+
+- name: Install Redis {{ redis_version }}
+  win_chocolatey:
+    name: "{{ redis_package_name }}"
+    version: "{{ redis_version }}"
+    state: present
+  register: redis_install
+
+- meta: flush_handlers
+
+- name: Wait for Redis installation to complete
+  win_shell: Start-Sleep -Seconds 5
+  when: redis_install.changed
+
+- name: Check if Redis executable exists in lib path
+  win_stat:
+    path: "{{ redis_lib_path }}\\redis-server.exe"
+  register: redis_exe_check_lib
+
+- name: Check if Redis executable exists in tools path
+  win_stat:
+    path: "{{ redis_tools_path }}\\redis-server.exe"
+  register: redis_exe_check_tools
+
+- name: Check if Redis CLI exists in lib path
+  win_stat:
+    path: "{{ redis_lib_path }}\\redis-cli.exe"
+  register: redis_cli_check_lib
+
+- name: Set Redis executable and CLI paths
+  set_fact:
+    redis_exe_path: "{{ (redis_exe_check_lib.stat.exists | ternary(redis_lib_path + '\\\\redis-server.exe', redis_tools_path + '\\\\redis-server.exe')) }}"
+    redis_cli_path: "{{ (redis_cli_check_lib.stat.exists | ternary(redis_lib_path + '\\\\redis-cli.exe', redis_tools_path + '\\\\redis-cli.exe')) }}"
+
+- name: Check if Redis CLI is available using full path
+  win_command: "{{ redis_cli_path }} --version"
+  register: redis_cli_version_output
+  changed_when: false
+  failed_when: false
+  when: redis_exe_check_lib.stat.exists or redis_exe_check_tools.stat.exists
+
+- name: Fail if Redis is not installed
+  fail:
+    msg: >
+      Redis is not installed. Executable not found at {{ redis_lib_path }}\redis-server.exe
+      or {{ redis_tools_path }}\redis-server.exe.
+      Please check if Chocolatey installed Redis correctly.
+  when: not redis_exe_check_lib.stat.exists and not redis_exe_check_tools.stat.exists
+
+- name: Check if Redis service exists
+  win_service:
+    name: "{{ redis_service_name }}"
+  register: redis_service_check
+  failed_when: false
+
+- name: Check if Redis config file exists
+  win_stat:
+    path: "{{ redis_lib_path }}\\redis.windows.conf"
+  register: redis_config_check
+
+- name: Set Redis config path
+  set_fact:
+    redis_conf_path: "{{ (redis_config_check.stat.exists | ternary(redis_lib_path + '\\\\redis.windows.conf', '')) }}"
+
+- name: Set Redis maxheap in config (prevents Windows heap map disk exhaustion)
+  win_lineinfile:
+    path: "{{ redis_conf_path }}"
+    regexp: '^\s*#?\s*maxheap\s+.*$'
+    line: "maxheap {{ redis_maxheap_bytes }}"
+  when: redis_config_check.stat.exists
+
+- name: Create Redis service using NSSM (with config)
+  win_command: >
+    nssm install "{{ redis_service_name }}"
+    "{{ redis_exe_path }}"
+    "{{ redis_conf_path }}"
+  when: not redis_service_check.exists and redis_config_check.stat.exists
+
+- name: Create Redis service using NSSM (without config)
+  win_command: >
+    nssm install "{{ redis_service_name }}"
+    "{{ redis_exe_path }}"
+  when: not redis_service_check.exists and not redis_config_check.stat.exists
+
+- name: Re-check if Redis service exists (post-create)
+  win_service:
+    name: "{{ redis_service_name }}"
+  register: redis_service_check_after
+  failed_when: false
+
+- name: Set Redis service display name
+  win_command: nssm set "{{ redis_service_name }}" DisplayName "{{ redis_service_display_name }}"
+  when: not redis_service_check.exists
+
+- name: Set Redis service description
+  win_command: nssm set "{{ redis_service_name }}" Description "{{ redis_service_description }}"
+  when: not redis_service_check.exists
+
+- name: Set Redis service working directory
+  win_command: nssm set "{{ redis_service_name }}" AppDirectory "{{ redis_lib_path }}"
+  when: not redis_service_check.exists
+
+- name: Set Redis service to auto-restart on failure
+  win_command: nssm set "{{ redis_service_name }}" AppExit Default Restart
+  when: not redis_service_check.exists
+
+- name: Get Redis service application (if exists)
+  win_command: nssm get "{{ redis_service_name }}" Application
+  register: redis_service_application
+  changed_when: false
+  failed_when: false
+  when: (redis_service_check.exists) or (redis_service_check_after.exists | default(false))
+
+- name: Force Redis service application to real binary when available
+  win_command: nssm set "{{ redis_service_name }}" Application "{{ redis_exe_path }}"
+  when:
+    - redis_exe_check_lib.stat.exists
+    - (redis_service_check.exists) or (redis_service_check_after.exists | default(false))
+
+- name: Ensure Redis service config and working directory are correct (existing service)
+  win_command: nssm set "{{ redis_service_name }}" AppParameters "{{ redis_conf_path }}"
+  when:
+    - (redis_service_check.exists) or (redis_service_check_after.exists | default(false))
+    - redis_config_check.stat.exists
+
+- name: Ensure Redis service working directory is correct (existing service)
+  win_command: nssm set "{{ redis_service_name }}" AppDirectory "{{ redis_lib_path }}"
+  when: (redis_service_check.exists) or (redis_service_check_after.exists | default(false))
+
+- name: Configure Redis service startup type and start service
+  win_service:
+    name: "{{ redis_service_name }}"
+    start_mode: auto
+    state: started
+  register: redis_start_result
+  failed_when: false
+
+- name: Reset Redis service from paused to stopped (if needed)
+  win_shell: |
+    $svc = Get-Service -Name "{{ redis_service_name }}" -ErrorAction SilentlyContinue
+    if ($null -ne $svc -and $svc.Status -eq 'Paused') {
+      nssm stop "{{ redis_service_name }}" confirm | Out-Null
+      Start-Sleep -Seconds 2
+    }
+  changed_when: false
+  failed_when: false
+
+- name: Start Redis service explicitly
+  win_command: nssm start "{{ redis_service_name }}"
+  changed_when: false
+  failed_when: false
+
+- name: Verify Redis service is running (with retry)
+  win_service:
+    name: "{{ redis_service_name }}"
+  register: redis_service_status
+  retries: 6
+  delay: 5
+  until: redis_service_status.state == 'running'
+  failed_when: redis_service_status.state != 'running'
+
+- name: Test Redis connection
+  win_command: "{{ redis_cli_path }} ping"
+  register: redis_ping
+  changed_when: false
+  failed_when: false
+
+- name: Display Redis installation status
+  debug:
+    msg: |
+      Redis {{ redis_version }} installation completed
+      Service Name: {{ redis_service_name }}
+      Service Status: {{ redis_service_status.state }}
+      Installation Path: {{ redis_tools_path }}
+      Redis Connection Test: {{ redis_ping.stdout | default('N/A') }}

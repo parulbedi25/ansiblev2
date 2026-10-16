@@ -1,0 +1,151 @@
+---
+# tasks file for roles/nginx
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+- name: Ensure Nginx apps directory exists
+  win_file:
+    path: "{{ nginx_apps_dir }}"
+    state: directory
+
+- name: Check if Nginx is already installed
+  win_stat:
+    path: "{{ nginx_root_path }}\\nginx.exe"
+  register: nginx_installed
+
+- name: Check if Nginx ZIP already exists
+  win_stat:
+    path: "{{ temp_dir }}\\{{ nginx_zip }}"
+  register: nginx_zip_exists
+
+- name: Download Nginx {{ nginx_version }} ZIP
+  win_get_url:
+    url: "{{ nginx_url }}"
+    dest: "{{ temp_dir }}\\{{ nginx_zip }}"
+  when: not nginx_installed.stat.exists and not nginx_zip_exists.stat.exists
+
+- name: Extract Nginx to temp directory
+  win_unzip:
+    src: "{{ temp_dir }}\\{{ nginx_zip }}"
+    dest: "{{ temp_dir }}"
+    creates: "{{ temp_dir }}\\{{ nginx_folder }}"
+  when: not nginx_installed.stat.exists
+
+- name: Move Nginx to apps directory
+  win_shell: |
+    Move-Item -Path "{{ temp_dir }}\\{{ nginx_folder }}" -Destination "{{ nginx_root_path }}" -Force
+  when: not nginx_installed.stat.exists
+
+- name: Safely add Nginx directory to system PATH
+  win_path:
+    elements:
+      - "{{ nginx_root_path }}"
+    scope: machine
+    state: present
+
+- name: Ensure Nginx log directory exists
+  win_file:
+    path: "{{ nginx_log_dir }}"
+    state: directory
+
+- name: Check if Nginx service already exists
+  win_service:
+    name: "{{ nginx_service_name }}"
+  register: nginx_service_check
+  failed_when: false
+
+- name: Stop existing Nginx service if running
+  win_service:
+    name: "{{ nginx_service_name }}"
+    state: stopped
+  when: nginx_service_check.exists
+  failed_when: false
+
+- name: Remove existing Nginx service if exists
+  win_command: nssm remove "{{ nginx_service_name }}" confirm
+  when: nginx_service_check.exists
+  failed_when: false
+
+- name: Deploy custom nginx.conf from template
+  win_template:
+    src: nginx.conf.j2
+    dest: "{{ nginx_root_path }}\\conf\\nginx.conf"
+  notify: restart nginx
+
+- name: Install Nginx service using NSSM
+  win_command: >
+    nssm install "{{ nginx_service_name }}"
+    "{{ nginx_root_path }}\\nginx.exe"
+
+- name: Set Nginx service display name
+  win_command: nssm set "{{ nginx_service_name }}" DisplayName "{{ nginx_service_display_name }}"
+
+- name: Set Nginx service description
+  win_command: nssm set "{{ nginx_service_name }}" Description "{{ nginx_service_description }}"
+
+- name: Set Nginx service working directory
+  win_command: nssm set "{{ nginx_service_name }}" AppDirectory "{{ nginx_root_path }}"
+
+- name: Set Nginx service stdout log
+  win_command: nssm set "{{ nginx_service_name }}" AppStdout "{{ nginx_log_dir }}\\stdout.log"
+
+- name: Set Nginx service stderr log
+  win_command: nssm set "{{ nginx_service_name }}" AppStderr "{{ nginx_log_dir }}\\stderr.log"
+
+- name: Set Nginx log rotation
+  win_command: nssm set "{{ nginx_service_name }}" AppRotateFiles 1
+
+- name: Set Nginx log rotation size (10 MB)
+  win_command: nssm set "{{ nginx_service_name }}" AppRotateBytes 10485760
+
+- name: Set Nginx service startup type to automatic
+  win_command: nssm set "{{ nginx_service_name }}" Start SERVICE_AUTO_START
+
+- name: Configure Nginx service restart on failure
+  win_command: nssm set "{{ nginx_service_name }}" AppExit Default Restart
+
+- name: Set Nginx restart delay (10 seconds)
+  win_command: nssm set "{{ nginx_service_name }}" AppRestartDelay "{{ nginx_service_restart_delay }}"
+
+- name: Configure Nginx service startup mode (auto)
+  win_service:
+    name: "{{ nginx_service_name }}"
+    start_mode: auto
+    state: started
+
+- name: Check Nginx version
+  win_command: nginx -v
+  register: nginx_version_output
+  changed_when: false
+  failed_when: false
+
+- name: Fail if Nginx binary is not available
+  fail:
+    msg: >
+      Nginx is not installed or not available in PATH.
+      Please check Nginx installation.
+  when: nginx_version_output.rc != 0
+
+- name: Wait for Nginx to start
+  win_wait_for:
+    port: "{{ nginx_port }}"
+    timeout: 30
+    delay: 5
+
+- name: Verify Nginx is responding locally
+  win_shell: |
+    try {
+      $response = Invoke-WebRequest -Uri http://127.0.0.1:{{ nginx_port }} -UseBasicParsing -TimeoutSec 5
+      if ($response.StatusCode -eq 200) {
+        exit 0
+      } else {
+        exit 1
+      }
+    } catch {
+      exit 1
+    }
+  register: nginx_check
+  changed_when: false
+  failed_when: nginx_check.rc != 0

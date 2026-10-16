@@ -1,0 +1,696 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: '',
+            description: 'Jenkins agent label where the application will be deployed. Format: project-environment-ip (example copper-dev-10.10.3.150). Ensure the label exactly matches an existing Jenkins node.'
+        )
+        string(
+            name: 'BUILD_VERSION',
+            defaultValue: '',
+            description: 'Specify the build version to deploy. Required format: dd-MM-yyyy-v1.0.0-BuildNumber (example: 17-02-2026-v1.0.0-175).'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+    }
+
+    environment {
+        PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+        TOMCAT_HOME          = '/opt/apache-tomcat-9.0.115'
+        TOMCAT_WEBAPPS       = '/opt/apache-tomcat-9.0.115/webapps'
+        TOMCAT_ROOT          = '/opt/apache-tomcat-9.0.115/webapps/ROOT'
+        TOMCAT_LOGS          = '/opt/apache-tomcat-9.0.115/logs'
+        NGINX_HTML_DIR       = '/usr/local/nginx/html'
+        AI_DEPLOY_DIR        = '/opt/deploy/AI'
+        NODE_DEPLOY_DIR      = '/opt/deploy/atms_node_microservices'
+        ANSIBLE_OS           = "linux"
+    }
+
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+
+                    def missingParams = []
+                    def formatErrors  = []
+
+                    def targetMachine = params.PROJECT_TARGET_MACHINE?.trim()?.toLowerCase()
+                    def buildVersion  = params.BUILD_VERSION?.trim()
+                    def notificationEmails = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+
+                    // -----------------------------
+                    // Check missing
+                    // -----------------------------
+                    if (!targetMachine) {
+                        missingParams << "PROJECT_TARGET_MACHINE"
+                    }
+
+                    if (!buildVersion) {
+                        missingParams << "BUILD_VERSION"
+                    }
+                    if (!notificationEmails) {
+                        missingParams << "NOTIFICATION_EMAILS"
+                    }
+
+                    // -----------------------------
+                    // Validate PROJECT_TARGET_MACHINE
+                    // -----------------------------
+                    if (targetMachine) {
+
+                        def machineRegex = /^[a-z0-9]+-[a-z0-9]+-(\d{1,3}\.){3}\d{1,3}$/
+
+                        if (!(targetMachine ==~ machineRegex)) {
+                            formatErrors << "PROJECT_TARGET_MACHINE format is invalid"
+                        } else {
+                            // Validate IP range (0-255)
+                            def ipPart = targetMachine.tokenize('-')[-1]
+                            def octets = ipPart.tokenize('.')
+
+                            for (octet in octets) {
+                                if (octet.toInteger() > 255) {
+                                    formatErrors << "PROJECT_TARGET_MACHINE contains invalid IP address"
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    // -----------------------------
+                    // Validate BUILD_VERSION
+                    // -----------------------------
+                    if (buildVersion) {
+
+                        def versionRegex = /^(0[1-9]|[12][0-9]|3[01])-(0[1-9]|1[0-2])-\d{4}-v\d+\.\d+\.\d+-\d+$/
+
+                        if (!(buildVersion ==~ versionRegex)) {
+                            formatErrors << "BUILD_VERSION format is invalid"
+                        }
+                    }
+
+                    if (notificationEmails) {
+
+                        def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+                        def emailList = notificationEmails
+                                            .split(',')
+                                            .collect { it.trim() }
+                                            .findAll { it }
+
+                        // Check duplicates
+                        if (emailList.size() != emailList.unique().size()) {
+                            formatErrors << "Duplicate email addresses found in NOTIFICATION_EMAILS"
+                        }
+
+                        // Validate format
+                        for (email in emailList) {
+                            if (!(email ==~ emailRegex)) {
+                                formatErrors << "Invalid email format detected: ${email}"
+                            }
+                        }
+                    }
+
+
+
+                    // -----------------------------
+                    // Final validation result
+                    // -----------------------------
+                    if (missingParams || formatErrors) {
+
+                        error """
+====================================================
+BUILD FAILED - Parameter Validation Error
+====================================================
+
+${missingParams ? "Missing Parameters:\n${missingParams.join('\n')}\n" : ""}
+${formatErrors ? "Format Errors:\n${formatErrors.join('\n')}\n" : ""}
+
+Expected Formats:
+
+PROJECT_TARGET_MACHINE:
+project-environment-ip
+Example:
+copper-dev-10.10.3.150
+
+BUILD_VERSION:
+dd-MM-yyyy-v1.0.0-BuildNumber
+Example:
+17-02-2026-v1.0.0-175
+
+NOTIFICATION_EMAILS:
+Comma-separated valid email addresses
+Example:
+user1@qasource.com, user2@qasource.com
+====================================================
+"""
+                    }
+
+                    echo "All parameters validated successfully."
+                    echo "Target Machine -> ${targetMachine}"
+                    echo "Build Version  -> ${buildVersion}"
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 0: Stop all running services
+        // =============================================
+        stage('Stop All Services') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Stopping All Running Services"
+                    echo "========================================"
+
+
+                    echo "[1/4] Stopping ATMS-Python-AI service..."
+                    sudo systemctl stop atms-python-ai || echo "atms-python-ai was not running"
+
+                    echo "[2/4] Stopping ATMS-Node-Microservice service..."
+                    sudo systemctl stop atms-node-microservice || echo "atms-node-microservice was not running"
+
+                    echo "[3/4] Stopping Tomcat service..."
+                    sudo systemctl stop tomcat || echo "tomcat was not running"
+                    sudo pkill -f 'org.apache.catalina.startup.Bootstrap' || true
+                    sleep 3
+
+                    echo "[4/4] Stopping Nginx..."
+                    sudo systemctl stop nginx || echo "nginx was not running"
+
+                    echo "Waiting for processes to release file locks..."
+                    sleep 10
+
+                    echo "All services stopped."
+                    echo "========================================"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 1: Download all artifacts from Nexus
+        // =============================================
+        stage('Download Artifacts from Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        def projectName = params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]
+
+                        // AI-Python Artifact
+                        sh '''
+                            set -e
+                            ARTIFACT_DIR="$AI_DEPLOY_DIR"
+
+
+                            echo "========================================"
+                            echo "Preparing AI-Python Artifact Directory"
+                            echo "========================================"
+
+                            # Create directory as root
+                            sudo mkdir -p "$ARTIFACT_DIR"
+
+                            # Give ownership to Jenkins user
+                            sudo chown -R $(whoami):$(whoami) "$ARTIFACT_DIR"
+
+                            # Now clean normally (without sudo)
+                            rm -rf "$ARTIFACT_DIR"/*
+
+                            echo "Downloading AI-Python.zip (version: $BUILD_VERSION)..."
+
+                            curl -f -u "$NEXUS_USER:$NEXUS_PASSWORD" -o "$ARTIFACT_DIR/AI-Python.zip" "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$BUILD_VERSION/AI-Python/AI-Python.zip"
+
+                            PYTHON_BIN="$(command -v python3 || command -v python || true)"
+                            if [ -z "$PYTHON_BIN" ]; then
+                                echo "ERROR: python3/python not found; required to extract AI-Python.zip"
+                                exit 1
+                            fi
+
+                            echo "Extracting AI-Python artifact..."
+                            env ZIP_PATH="$ARTIFACT_DIR/AI-Python.zip" DEST_DIR="$ARTIFACT_DIR" "$PYTHON_BIN" - <<'PY'
+import os
+import zipfile
+
+zip_path = os.environ["ZIP_PATH"]
+dest_dir = os.environ["DEST_DIR"]
+
+with zipfile.ZipFile(zip_path) as zf:
+    zf.extractall(dest_dir)
+PY
+
+                            rm -f "$ARTIFACT_DIR/AI-Python.zip"
+
+                            echo "AI-Python artifact ready at $ARTIFACT_DIR"
+                        '''
+
+                        // Node Microservice Artifact
+                        sh '''
+                            set -e
+                            ARTIFACT_DIR="$NODE_DEPLOY_DIR"
+
+
+                            echo "========================================"
+                            echo "Preparing Node Microservice Artifact Directory"
+                            echo "========================================"
+
+                            sudo mkdir -p "$ARTIFACT_DIR"
+                            sudo chown -R $(whoami):$(whoami) "$ARTIFACT_DIR"
+                            rm -rf "$ARTIFACT_DIR"/*
+
+                            echo "Downloading atms-node-microservice.zip (version: $BUILD_VERSION)..."
+
+                            curl -f -u "$NEXUS_USER:$NEXUS_PASSWORD" -o "$ARTIFACT_DIR/node-microservice.zip" "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$BUILD_VERSION/atms-node-microservice/atms-node-microservice.zip"
+
+                            PYTHON_BIN="$(command -v python3 || command -v python || true)"
+                            if [ -z "$PYTHON_BIN" ]; then
+                                echo "ERROR: python3/python not found; required to extract node-microservice.zip"
+                                exit 1
+                            fi
+
+                            echo "Extracting node microservice artifact..."
+                            env ZIP_PATH="$ARTIFACT_DIR/node-microservice.zip" DEST_DIR="$ARTIFACT_DIR" "$PYTHON_BIN" - <<'PY'
+import os
+import zipfile
+
+zip_path = os.environ["ZIP_PATH"]
+dest_dir = os.environ["DEST_DIR"]
+
+with zipfile.ZipFile(zip_path) as zf:
+    zf.extractall(dest_dir)
+PY
+
+                            rm -f "$ARTIFACT_DIR/node-microservice.zip"
+
+                            echo "Node microservice artifact ready at $ARTIFACT_DIR"
+                        '''
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 2: Setup Python venv and install deps
+        // =============================================
+        stage('Setup Virtual Environment and Install Dependencies') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Setting up Python Virtual Environment"
+                    echo "========================================"
+
+
+                    PYTHON_BIN="$(command -v python3 || command -v python || true)"
+                    if [ -z "$PYTHON_BIN" ]; then
+                        echo "ERROR: Python not found on this machine."
+                        exit 1
+                    fi
+
+                    echo "Found Python at: $PYTHON_BIN"
+                    "$PYTHON_BIN" --version
+
+                    APP_DIR="$AI_DEPLOY_DIR/test_script_generator"
+                    if [ ! -d "$APP_DIR" ]; then
+                        echo "ERROR: Cannot find AI test_script_generator at $APP_DIR"
+                        exit 1
+                    fi
+
+                    # Delete old environment if exists
+                    if [ -d "$APP_DIR/ai_aenv" ]; then
+                        echo "Removing existing virtual environment..."
+                        rm -rf "$APP_DIR/ai_aenv"
+                    fi
+
+                    # Create new environment using detected Python
+                    echo "Creating new virtual environment..."
+                    "$PYTHON_BIN" -m venv "$APP_DIR/ai_aenv"
+
+                    if [ ! -d "$APP_DIR/ai_aenv" ]; then
+                        echo "ERROR: Failed to create virtual environment"
+                        exit 1
+                    fi
+
+                    echo "Virtual environment created successfully"
+
+                    echo "Activating virtual environment and installing dependencies"
+                    /bin/bash -c "cd '$APP_DIR' && source ai_aenv/bin/activate && pip install -r Letest_requirements_ubuntu.txt && pip install 'flask[async]'"
+
+                    echo "========================================"
+                    echo "Environment Ready - Dependencies installed successfully"
+                    echo "========================================"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 3: Run Python Application
+        // =============================================
+        stage('Run Python Application') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Starting Python AI Application"
+                    echo "========================================"
+
+
+                    LOG_DIR="$AI_DEPLOY_DIR/test_script_generator/logs"
+                    echo "Ensuring logs folder exists..."
+                    mkdir -p "$LOG_DIR"
+
+                    echo "Starting atms-python-ai service..."
+                    sudo systemctl restart atms-python-ai
+
+                    sleep 8
+
+                    echo "Verifying service is running..."
+                    if ! sudo systemctl is-active --quiet atms-python-ai; then
+                        echo "ERROR: atms-python-ai service is not running"
+                        sudo systemctl status atms-python-ai --no-pager || true
+                        exit 1
+                    fi
+
+                    echo "Python AI Application started successfully"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 4: Deploy Node.js Microservice
+        // =============================================
+        stage('Deploy Node.js Microservice') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Starting Node.js Microservice"
+                    echo "========================================"
+
+
+                    LOG_DIR="$NODE_DEPLOY_DIR/logs"
+                    echo "Ensuring logs folder exists..."
+                    mkdir -p "$LOG_DIR"
+
+                    echo "Patching node executable path in service file..."
+                    NODE_BIN="/usr/local/nvm/versions/node/v10.15.1/bin/node"
+                    SERVICE_FILE="/etc/systemd/system/atms-node-microservice.service"
+                    if [ -f "$SERVICE_FILE" ]; then
+                        sudo sed -i "s|ExecStart=/usr/bin/node|ExecStart=$NODE_BIN|g" "$SERVICE_FILE"
+                        sudo systemctl daemon-reload
+                        echo "Service file patched and daemon reloaded"
+                    else
+                        echo "WARNING: Service file not found at $SERVICE_FILE"
+                    fi
+
+                    echo "Starting atms-node-microservice..."
+                    sudo systemctl restart atms-node-microservice
+
+                    sleep 8
+
+                    echo "Verifying service is running..."
+                    if ! sudo systemctl is-active --quiet atms-node-microservice; then
+                        echo "ERROR: atms-node-microservice is not running"
+                        sudo systemctl status atms-node-microservice --no-pager || true
+                        exit 1
+                    fi
+
+                    echo "Node.js microservice started successfully"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 5: Deploy WAR to Tomcat
+        // =============================================
+        stage('Deploy to Tomcat') {
+            steps {
+                sh '''
+                    set -e
+                    echo "Cleaning Tomcat deployment directories..."
+
+                    sudo rm -rf "$TOMCAT_WEBAPPS/ROOT"
+                    sudo rm -f  "$TOMCAT_WEBAPPS/ROOT.war"
+                    sudo rm -rf /opt/tomcat/work/Catalina/localhost/ROOT
+
+                    echo "Tomcat directories cleaned."
+                '''
+
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-credentials',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    sh '''
+                        set -e
+                        echo "Downloading WAR from Nexus..."
+                        echo "Repository: $NEXUS_REPO"
+                        echo "Version: $BUILD_VERSION"
+
+                        TEMP_WAR=$(mktemp /tmp/ROOT.war.XXXXXX)
+                        curl -f -u "$NEXUS_USER:$NEXUS_PASSWORD" -o "$TEMP_WAR" "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$BUILD_VERSION/atms-app/ROOT.war"
+                        sudo mv "$TEMP_WAR" "$TOMCAT_WEBAPPS/ROOT.war"
+                        sudo chown root:root "$TOMCAT_WEBAPPS/ROOT.war"
+                        sudo chmod 644 "$TOMCAT_WEBAPPS/ROOT.war"
+
+                        if sudo test -f "$TOMCAT_WEBAPPS/ROOT.war"; then
+                            sudo ls -l "$TOMCAT_WEBAPPS/ROOT.war"
+                        else
+                            echo "ERROR: ROOT.war file not found"
+                            exit 1
+                        fi
+                    '''
+                }
+
+                sh '''
+                    set -e
+                    echo "Starting Tomcat service..."
+
+                    sudo systemctl reset-failed tomcat || true
+                    sudo systemctl start tomcat
+
+                    echo "Waiting for Tomcat to initialize..."
+                    sleep 30
+
+                    echo "Verifying Tomcat is running..."
+                    if ! sudo systemctl is-active --quiet tomcat; then
+                        echo "ERROR: Tomcat failed to start"
+                        sudo systemctl status tomcat --no-pager || true
+                        echo "--- Tomcat catalina.out (last 50 lines) ---"
+                        sudo tail -n 50 /opt/tomcat/logs/catalina.out || true
+                        exit 1
+                    fi
+
+                    echo
+                    echo "========================================"
+                    echo "Tomcat Deployment Completed"
+                    echo "========================================"
+                    echo "Version: $BUILD_VERSION"
+                    echo "URL: http://localhost:8080"
+                    echo
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 6: Deploy UI to Nginx
+        // =============================================
+        stage('Deploy to Nginx') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'nexus-credentials',
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        sh '''
+                            set -e
+                            echo "========================================"
+                            echo "Deploying atms-ui to Nginx"
+                            echo "Version: $BUILD_VERSION"
+                            echo "========================================"
+
+
+                            # Detect nginx html root
+                            NGINX_HTML_DIR="${NGINX_HTML_DIR}"
+                            if [ -d "/usr/local/nginx/html" ]; then
+                                NGINX_HTML_DIR="/usr/local/nginx/html"
+                            elif [ -d "/usr/share/nginx/html" ]; then
+                                NGINX_HTML_DIR="/usr/share/nginx/html"
+                            fi
+
+                            echo "Using Nginx HTML directory: $NGINX_HTML_DIR"
+
+                            echo "Cleaning Nginx HTML directory..."
+                            sudo rm -rf "$NGINX_HTML_DIR"/*
+                            echo "Directory cleaned"
+
+                            echo "Downloading UI from Nexus..."
+                            TEMP_DIR=$(mktemp -d /tmp/atms-ui-deploy.XXXXXX)
+
+                            curl -f -u "$NEXUS_USER:$NEXUS_PASSWORD" -o "$TEMP_DIR/atms-ui-dist.tar.gz" "$NEXUS_URL/repository/$NEXUS_REPO/$PROJECT_NAME/linux/$BUILD_VERSION/atms-ui/atms-ui-dist.tar.gz"
+
+                            echo "Extracting archive..."
+                            tar -xzf "$TEMP_DIR/atms-ui-dist.tar.gz" -C "$TEMP_DIR"
+                            rm -f "$TEMP_DIR/atms-ui-dist.tar.gz"
+
+                            echo "Deploying to Nginx..."
+                            sudo cp -a "$TEMP_DIR"/. "$NGINX_HTML_DIR"/
+
+                            rm -rf "$TEMP_DIR"
+                            echo "Files deployed"
+
+                            echo "Restarting Nginx..."
+                            sudo systemctl restart nginx
+                            sleep 5
+
+                            echo "Verifying Nginx is running..."
+                            if ! sudo systemctl is-active --quiet nginx; then
+                                echo "ERROR: Nginx failed to start"
+                                sudo systemctl status nginx --no-pager || true
+                                exit 1
+                            fi
+
+                            echo
+                            echo "========================================"
+                            echo "Nginx Deployment Completed"
+                            echo "========================================"
+                            echo "Location: $NGINX_HTML_DIR"
+                            echo "Version: $BUILD_VERSION"
+                            echo "URL: http://localhost:6003"
+                            echo
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+
+                    def appDir = "/home/$USER/app"
+                    // -----------------------------
+                    // 1️⃣ Read Current Version
+                    // -----------------------------
+                    def currentVersion = sh(
+                        script: """
+                        if [ -f ${appDir}/version.txt ]; then
+                            cat ${appDir}/version.txt
+                        else
+                            echo none
+                        fi
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Current Version: ${currentVersion}"
+
+                    // -----------------------------
+                    // 2️⃣ Ensure Directory Exists
+                    // -----------------------------
+                    sh "mkdir -p ${appDir}"
+
+                    // -----------------------------
+                    // 3️⃣ Update Version File
+                    // -----------------------------
+                    sh """
+                    echo "${params.BUILD_VERSION}" > ${appDir}/version.txt
+                    """
+
+                    echo """
+        ========================================
+        DEPLOYMENT SUCCESSFUL
+        ========================================
+        Previous Version : ${currentVersion}
+        New Version      : ${params.BUILD_VERSION}
+
+        All components deployed successfully:
+        - Python AI Application: Running
+        - Node.js Microservice: Running on port 4001
+        - atms-web (v${params.BUILD_VERSION}): http://localhost:8080
+        - atms-ui (v${params.BUILD_VERSION}): http://localhost:6003
+        ========================================
+        """
+                def executionTime = currentBuild.durationString.replace(' and counting', '')
+                sh """
+                export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+                node /home/$USER/script/sendDeploymentEmail.js --smtpServer="${SMTP_SERVER}" --smtpUser="${SMTP_USER}" --smtpPassword="${SMTP_PASSWORD}" --smtpPort="${SMTP_PORT}" --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="${params.NOTIFICATION_EMAILS}" --targetMachine="${params.PROJECT_TARGET_MACHINE}" --buildVersion="${params.BUILD_VERSION}" --osType="${ANSIBLE_OS}" --currentVersion="${currentVersion}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                """
+
+                // sleep(time: 4, unit: 'SECONDS')
+
+                // sh """
+                // export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+                // node /home/user/script/sendDeploymentEmail-devops.js --smtpServer="${SMTP_SERVER}" --smtpUser="${SMTP_USER}" --smtpPassword="${SMTP_PASSWORD}" --smtpPort="${SMTP_PORT}" --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --targetMachine="${params.PROJECT_TARGET_MACHINE}" --buildVersion="${params.BUILD_VERSION}" --osType="${ANSIBLE_OS}" --currentVersion="${currentVersion}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                // """
+                    }
+                }
+            }
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    def appDir = "/home/$USER/app"
+                    def currentVersion = sh(
+                        script: """
+                        if [ -f ${appDir}/version.txt ]; then
+                            cat ${appDir}/version.txt
+                        else
+                            echo none
+                        fi
+                        """,
+                        returnStdout: true
+                    ).trim()
+
+                    echo """
+        ========================================
+        DEPLOYMENT FAILED
+        ========================================
+        Attempted Version : ${params.BUILD_VERSION}
+        Current Version   : ${currentVersion}
+
+        Deployment did NOT complete.
+        Version file was NOT modified.
+
+        Check logs above for root cause.
+        ========================================
+        """
+                // def executionTime = currentBuild.durationString.replace(' and counting', '')
+                // sh """
+                // export PATH=/usr/local/nvm/versions/node/v10.15.1/bin:$PATH
+                // node /home/$USER/script/sendDeploymentEmail-devops.js --smtpServer="${SMTP_SERVER}" --smtpUser="${SMTP_USER}" --smtpPassword="${SMTP_PASSWORD}" --smtpPort="${SMTP_PORT}" --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --targetMachine="${params.PROJECT_TARGET_MACHINE}" --buildVersion="${params.BUILD_VERSION}" --osType="${ANSIBLE_OS}" --currentVersion="${currentVersion}" --executionTime="${executionTime}" --status="failure" --runUrl="${env.BUILD_URL}"
+                // """
+                    }
+                }
+            }
+        }
+
+}

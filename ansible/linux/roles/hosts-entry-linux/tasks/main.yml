@@ -1,0 +1,20 @@
+---
+# tasks file for hosts-entry-linux
+- name: Configure passwordless sudo for deployment user
+  lineinfile:
+    path: "/etc/sudoers.d/{{ ansible_user }}-nopasswd"
+    line: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL"
+    create: yes
+    mode: '0440'
+    validate: 'visudo -cf %s'
+  become: yes
+
+- name: Add entries to Linux hosts file
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ item.ip }}    {{ item.hostname }}"
+    regexp: ".*\\s+{{ item.hostname | regex_escape }}$"
+    state: present
+  loop: "{{ hosts_entries }}"
+  loop_control:
+    label: "{{ item.ip }} -> {{ item.hostname }}"

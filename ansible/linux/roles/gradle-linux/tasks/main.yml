@@ -1,0 +1,105 @@
+---
+# tasks file for roles/gradle-linux
+- name: Check if Gradle is already installed
+  command: gradle --version
+  register: gradle_check
+  changed_when: false
+  failed_when: false
+
+- name: Display Gradle installation status
+  debug:
+    msg: "Gradle is {{ 'already installed' if gradle_check.rc == 0 else 'not installed' }}"
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: gradle_check.rc != 0
+
+- name: Install required packages
+  apt:
+    name:
+      - build-essential
+      - openjdk-8-jdk
+      - wget
+      - unzip
+    state: present
+  when: gradle_check.rc != 0
+
+- name: Verify Java installation
+  command: java -version
+  register: java_check
+  changed_when: false
+  failed_when: false
+  when: gradle_check.rc != 0
+
+- debug:
+    msg: "Java version: {{ java_check.stderr_lines | join('\n') }}"
+  when: gradle_check.rc != 0
+
+- name: Download Gradle {{ gradle_version }}
+  get_url:
+    url: "{{ gradle_url }}"
+    dest: "/tmp/{{ gradle_archive }}"
+    mode: '0644'
+    timeout: 300
+  when: gradle_check.rc != 0
+
+- name: Create opt directory
+  file:
+    path: /opt
+    state: directory
+    mode: '0755'
+  when: gradle_check.rc != 0
+
+- name: Extract Gradle archive
+  unarchive:
+    src: "/tmp/{{ gradle_archive }}"
+    dest: /opt
+    remote_src: yes
+    creates: "{{ gradle_install_dir }}"
+  when: gradle_check.rc != 0
+
+- name: Add Gradle bin to system PATH
+  shell: |
+    if grep -q "^PATH=" /etc/environment; then
+      sed -i 's|^PATH="\(.*\)"|PATH="/opt/gradle-{{ gradle_version }}/bin:\1"|g' /etc/environment
+      sed -i 's|^PATH=\(.*\)|PATH=/opt/gradle-{{ gradle_version }}/bin:\1|g' /etc/environment
+    else
+      echo 'PATH="/opt/gradle-{{ gradle_version }}/bin:$PATH"' >> /etc/environment
+    fi
+  args:
+    executable: /bin/bash
+  when: gradle_check.rc != 0
+
+- name: Set up Gradle PATH in profile.d for all users
+  copy:
+    dest: /etc/profile.d/gradle.sh
+    content: |
+      #!/bin/bash
+      export PATH=/opt/gradle-{{ gradle_version }}/bin:$PATH
+    mode: '0644'
+  when: gradle_check.rc != 0
+
+- name: Verify Gradle installation
+  command: /opt/gradle-{{ gradle_version }}/bin/gradle --version
+  register: gradle_version_check
+  changed_when: false
+  failed_when: false
+
+- debug:
+    msg: "Gradle version: {{ gradle_version_check.stdout_lines | join('\n') }}"
+
+- name: Test Gradle command availability
+  shell: gradle --version
+  register: gradle_command_check
+  changed_when: false
+  failed_when: false
+
+- debug:
+    msg: "Gradle command check: {{ gradle_command_check.stdout_lines | join('\n') }}"
+
+- name: Clean up downloaded archive
+  file:
+    path: "/tmp/{{ gradle_archive }}"
+    state: absent

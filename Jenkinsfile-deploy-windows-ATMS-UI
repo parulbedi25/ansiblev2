@@ -1,0 +1,339 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: 'copper-dev-10.10.12.78',
+            description: 'Jenkins agent label'
+        )
+
+        string(
+            name: 'BUILD_VERSION',
+            defaultValue: '',
+            description: 'Release version to deploy. Example: 17-02-2026-v1.0.0-175'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma separated email addresses'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['D', 'E', 'F'],
+            description: 'Drive for deployment workspace'
+        )
+    }
+
+    environment {
+
+        // Project
+        PROJECT_NAME = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        SERVICE_NAME = 'atms-ui'
+
+        // Nexus
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        // Workspace
+        UI_DEPLOY_DIR = "${params.DEPLOY_DRIVE}:\\QASIP\\Apps\\atms-ui"
+        UI_APP_DIR        = "${UI_DEPLOY_DIR}"
+
+        // Artifact stored on Nexus
+        ARTIFACT_NAME = 'atms-ui.tar.gz'
+        NEXUS_DOWNLOAD_URL = "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${params.BUILD_VERSION}/${SERVICE_NAME}/${ARTIFACT_NAME}"
+        ARTIFACT_PATH = "${UI_APP_DIR}\\${ARTIFACT_NAME}"
+
+        // Nginx Config
+        NGINX_ROOT_DIR = 'C:\\qasip\\qasip\\nginx-1.8.1\\nginx'
+        NGINX_HTML_DIR = 'C:\\qasip\\qasip\\nginx-1.8.1\\nginx\\html'
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+
+            steps {
+
+                script {
+
+                    if (!params.PROJECT_TARGET_MACHINE?.trim()) {
+                        error("PROJECT_TARGET_MACHINE is required")
+                    }
+
+                    if (!params.BUILD_VERSION?.trim()) {
+                        error("BUILD_VERSION is required")
+                    }
+
+                    echo """
+                    ========================================
+                    DEPLOYMENT CONFIGURATION
+                    ========================================
+
+                    Agent            : ${params.PROJECT_TARGET_MACHINE}
+                    Build Version    : ${params.BUILD_VERSION}
+
+                    Download URL     :
+                    ${NEXUS_DOWNLOAD_URL}
+
+                    Nginx Root       :
+                    ${NGINX_ROOT_DIR}
+
+                    Nginx HTML       :
+                    ${NGINX_HTML_DIR}
+
+                    ========================================
+                    """
+                }
+            }
+        }
+
+        // stage('Prepare Workspace') {
+
+        //     steps {
+
+        //         bat """
+        //             @echo off
+
+        //             echo ========================================
+        //             echo Preparing Deployment Workspace
+        //             echo ========================================
+
+        //             if exist "${UI_APP_DIR}" (
+        //                 rmdir /S /Q "${UI_APP_DIR}"
+        //             )
+
+        //             mkdir "${UI_APP_DIR}"
+
+        //             echo Workspace prepared successfully.
+        //         """
+        //     }
+        // }
+
+        stage('Download Artifact') {
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${NEXUS_CREDENTIALS_ID}",
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        @echo off
+
+                        echo ========================================
+                        echo Downloading Artifact from Nexus
+                        echo ========================================
+
+                        if not exist "${UI_APP_DIR}" (
+                            mkdir "${UI_APP_DIR}"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to create directory
+                            exit /b 1
+                          )
+                        )
+                        echo Directory ready:
+                        echo ${UI_APP_DIR}
+                        echo.
+                        echo Downloading artifact...
+
+                        curl.exe ^
+                        -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                        -L ^
+                        -o "${ARTIFACT_PATH}" ^
+                        "${NEXUS_DOWNLOAD_URL}"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download artifact
+                            exit /b 1
+                          )
+
+                        if not exist "${ARTIFACT_PATH}" (
+                            echo ERROR: Artifact not found
+                            exit /b 1
+                        )
+
+                        echo Download completed successfully.
+
+                        echo Artifact:
+                        echo ${ARTIFACT_PATH}
+                    """
+                }
+            }
+        }
+
+
+        stage('Deploy to Nginx') {
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Deploying atms-ui to Nginx
+                    echo ========================================
+
+                    echo.
+                    echo Cleaning Nginx HTML directory...
+
+                    if exist "%NGINX_HTML_DIR%" (
+
+                        del /F /Q /S "%NGINX_HTML_DIR%\\*" >nul 2>&1
+
+                        for /d %%p in ("%NGINX_HTML_DIR%\\*") do (
+                            rmdir /S /Q "%%p"
+                        )
+                    )
+
+                    echo Nginx HTML directory cleaned.
+
+                    echo.
+                    echo Copying artifact to Nginx directory...
+
+                    copy /Y "${ARTIFACT_PATH}" "%NGINX_HTML_DIR%\\${ARTIFACT_NAME}"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to copy artifact
+                        exit /b 1
+                    )
+
+                    echo Artifact copied successfully.
+
+                    echo.
+                    echo Extracting artifact inside Nginx directory...
+
+                    cd /d "%NGINX_HTML_DIR%"
+
+                    tar -xzf "${ARTIFACT_NAME}"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to extract artifact
+                        exit /b 1
+                    )
+
+                    echo Extraction completed successfully.
+
+                    echo.
+                    echo Removing archive...
+
+                    del /F /Q "${ARTIFACT_NAME}"
+
+                    echo Archive removed successfully.
+
+                    echo.
+                    echo Removing stale nginx PID...
+
+                    taskkill /F /IM nginx.exe >nul 2>&1
+                    del /F /Q "%NGINX_ROOT_DIR%\\logs\\nginx.pid" 2>nul
+
+                    echo.
+                    echo Starting Nginx...
+
+                    where wmic >nul 2>&1
+
+                    if %ERRORLEVEL% EQU 0 (
+
+                        wmic process call create "\\"%NGINX_ROOT_DIR%\\nginx.exe\\" -p \\"%NGINX_ROOT_DIR%\\""
+
+                    ) else (
+
+                        set BUILD_ID=dontKillMe
+                        set JENKINS_NODE_COOKIE=dontKillMe
+
+                        start "" /D "%NGINX_ROOT_DIR%" "%NGINX_ROOT_DIR%\\nginx.exe"
+                    )
+
+                    ping 127.0.0.1 -n 5 > nul
+
+                    echo.
+                    echo Verifying Nginx...
+
+                    tasklist /FI "IMAGENAME eq nginx.exe" | findstr /I nginx.exe
+
+                    if %ERRORLEVEL% NEQ 0 (
+
+                        echo ERROR: Nginx failed to start
+
+                        echo ========================================
+                        echo NGINX ERROR LOG
+                        echo ========================================
+
+                        type "%NGINX_ROOT_DIR%\\logs\\error.log" 2>nul
+
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo ========================================
+                    echo Deployment Completed Successfully
+                    echo ========================================
+
+                    echo Build Version :
+                    echo ${params.BUILD_VERSION}
+
+                    echo Deployment URL :
+                    echo http://localhost:6003
+
+                    echo.
+                    echo Deployed Files:
+                    dir /B "%NGINX_HTML_DIR%"
+                """
+            }
+        }
+    }
+
+    post {
+
+        success {
+
+            echo """
+            ========================================
+            DEPLOYMENT SUCCESSFUL
+            ========================================
+
+            Service Name :
+            ${SERVICE_NAME}
+
+            Build Version :
+            ${params.BUILD_VERSION}
+
+            Deployment URL :
+            http://localhost:6003
+
+            ========================================
+            """
+        }
+
+        failure {
+
+            echo """
+            ========================================
+            DEPLOYMENT FAILED
+            ========================================
+            """
+        }
+
+        always {
+
+            cleanWs()
+        }
+    }
+}

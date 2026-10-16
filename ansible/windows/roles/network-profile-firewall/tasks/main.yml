@@ -1,0 +1,13 @@
+---
+- name: Ensure inbound firewall rules for application ports
+  community.windows.win_firewall_rule:
+    name: "{{ firewall_rule_name_prefix }}-{{ item }}"
+    localport: "{{ item }}"
+    protocol: "{{ firewall_rule_protocol }}"
+    direction: "{{ firewall_rule_direction }}"
+    action: "{{ firewall_rule_action }}"
+    profiles: "{{ firewall_rule_profiles }}"
+    state: present
+    enabled: "{{ firewall_rule_enabled }}"
+    description: "Allow inbound traffic on port {{ item }} for application access"
+  loop: "{{ app_inbound_ports }}"

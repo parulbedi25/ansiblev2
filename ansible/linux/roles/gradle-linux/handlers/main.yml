@@ -1,0 +1,5 @@
+---
+# handlers file for roles/gradle-linux
+- name: update profile
+  command: /bin/true
+  # Placeholder handler for profile updates

@@ -1,0 +1,356 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: 'copper-dev-10.10.12.78',
+            description: 'Jenkins agent label'
+        )
+
+        string(
+            name: 'PROJECT_BRANCH',
+            defaultValue: 'qasip_devops',
+            description: 'Git branch name'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma separated email addresses'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['D', 'E', 'F'],
+            description: 'Drive for workspace and artifacts'
+        )
+
+        choice(
+            name: 'SPRING_PROFILE',
+            choices: ['local', 'dev', 'qa', 'uat', 'prod'],
+            description: 'Spring active profile'
+        )
+    }
+
+    environment {
+
+        // Project Configs
+        PROJECT_NAME    = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        SERVICE_NAME    = 'atms-app'
+        VERSION         = '1.0.0'
+        BUILD_DATE      = "${new Date().format('dd-MM-yyyy')}"
+        RELEASE_VERSION = "${BUILD_DATE}-v${VERSION}-${BUILD_NUMBER}"
+        WAR_VERSION     = "${RELEASE_VERSION}"
+
+        // Git
+        GIT_REPO_URL       = 'git@10.10.1.68:andes/atms-app.git'
+        GIT_CREDENTIALS_ID = 'jenkins-gitlab-118'
+
+        // Java / Gradle
+        // JAVA_HOME   = 'C:\\Program Files\\Java\\jdk-17'
+        JAVA_HOME   = 'C:\\Program Files\\Java\\jdk1.8.0_202'
+        // GRADLE_HOME = 'C:\\Gradle\\gradle-8.5'
+        GRADLE_HOME = 'C:\\ProgramData\\chocolatey\\lib\\gradle\\tools\\gradle-2.1'
+        // GRADLE_HOME = 'C:\\ProgramData\\chocolatey\\lib\\gradle\\tools\\gradle-8.5'
+
+        // Nexus
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        // Workspace Paths
+        REPO_BASE_DIR     = "${params.DEPLOY_DRIVE}:\\jenkins\\workspace\\QASIP Build ATMS-APP\\atms-app"
+        SERVICE_DIR       = "${REPO_BASE_DIR}"
+
+        // Build Output
+        WAR_BUILD_DIR     = "${REPO_BASE_DIR}\\atms-web\\build\\libs"
+        WAR_NAME          = 'ROOT.war'
+        WAR_LOCAL_PATH    = "${WAR_BUILD_DIR}\\${WAR_NAME}"
+
+        // Config Injection
+        PROPERTIES_FILE   = "${REPO_BASE_DIR}\\atms-web\\src\\main\\resources\\settings-local.properties"
+
+        // Nexus Upload
+        NEXUS_UPLOAD_PATH = "${PROJECT_NAME}/windows/${RELEASE_VERSION}/${SERVICE_NAME}/${WAR_NAME}"
+        WAR_UPLOAD_URL    = "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}"
+    }
+
+    stages {
+
+        stage('Checkout Source Code') {
+            steps {
+
+                dir("${REPO_BASE_DIR}") {
+
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${params.PROJECT_BRANCH}"]],
+                        userRemoteConfigs: [[
+                            url: env.GIT_REPO_URL,
+                            credentialsId: env.GIT_CREDENTIALS_ID
+                        ]]
+                    ])
+                }
+            }
+        }
+
+        stage('Clean Old Build Artifacts') {
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Cleaning Old Build Artifacts
+                    echo ========================================
+
+                    if exist "${WAR_BUILD_DIR}" (
+
+                        del /Q "${WAR_BUILD_DIR}\\*.war" 2>nul
+
+                        echo Old WAR files removed.
+
+                    ) else (
+
+                        echo Build directory not found.
+                        echo Skipping cleanup.
+
+                    )
+                """
+            }
+        }
+
+
+            stage('Prepare Configs and Inject Credentials') {
+                steps {
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'java-db-credentials',
+                            usernameVariable: 'JDBC_USER',
+                            passwordVariable: 'JDBC_PASS'
+                        )
+                    ]) {
+
+                        bat """
+                            @echo off
+
+                            echo ========================================
+                            echo Injecting JDBC Credentials
+                            echo ========================================
+                            echo.
+
+                            set "PROPS_FILE=%PROPERTIES_FILE%"
+
+                            if not exist "%PROPS_FILE%" (
+                                echo ERROR: settings-local.properties not found
+                                exit /b 1
+                            )
+
+                            echo File Found:
+                            echo %PROPS_FILE%
+                            echo.
+
+                            echo Updating jdbc.username and jdbc.password...
+                            echo.
+
+                            powershell -NoProfile -ExecutionPolicy Bypass -Command "\$content = Get-Content '%PROPS_FILE%' -Raw; \$content = \$content -replace 'jdbc\\.username\\s*=\\s*.*', 'jdbc.username = %JDBC_USER%'; \$content = \$content -replace 'jdbc\\.password\\s*=\\s*.*', 'jdbc.password = %JDBC_PASS%'; Set-Content '%PROPS_FILE%' \$content"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to inject JDBC credentials
+                                exit /b 1
+                            )
+
+                            echo ========================================
+                            echo Credentials injected successfully
+                            echo ========================================
+
+                            echo Updated file content:
+                            type "%PROPS_FILE%"
+                        """
+                    }
+                }
+            }
+
+
+
+        stage('Build Java Application') {
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo Building Java Application
+                    echo Build Number: ${BUILD_NUMBER}
+                    echo WAR Version: ${WAR_VERSION}
+
+                    set JAVA_HOME=${JAVA_HOME}
+                    set GRADLE_HOME=${GRADLE_HOME}
+                    set PATH=%GRADLE_HOME%\\bin;%JAVA_HOME%\\bin;%PATH%
+
+                    echo JAVA_HOME=%JAVA_HOME%
+                    echo GRADLE_HOME=%GRADLE_HOME%
+                    echo Checking Gradle Version
+                    call gradle -v
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Gradle not found
+                        exit /b 1
+                    )
+
+                    echo Checking Java Version
+                    call java -version
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Java not found
+                        exit /b 1
+                    )
+
+                    echo Navigating To Project Directory
+                    cd /d "${REPO_BASE_DIR}"
+
+                    if not exist "build.gradle" (
+                        echo ERROR: build.gradle not found
+                        dir
+                        exit /b 1
+                    )
+
+                    echo Running Gradle Build...
+                    echo.
+
+                    call gradle clean war ^
+                        -Dspring.profiles.active=${params.SPRING_PROFILE}
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Gradle build failed
+                        exit /b 1
+                    )
+
+                    if not exist "${WAR_BUILD_DIR}\\*.war" (
+                        echo ERROR: No WAR generated
+                        exit /b 1
+                    )
+
+                    echo Generated WAR:
+                    dir "${WAR_BUILD_DIR}\\*.war"
+                """
+            }
+        }
+
+        stage('Upload WAR To Nexus') {
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        @echo off
+                        echo Uploading WAR To Nexus
+                        echo Version: ${WAR_VERSION}
+
+                        cd /d "${WAR_BUILD_DIR}"
+
+                        set WAR_FILE=
+
+                        for %%f in (*.war) do (
+                            set WAR_FILE=%%f
+                        )
+
+                        if not defined WAR_FILE (
+                            echo ERROR: No WAR file found
+                            exit /b 1
+                        )
+
+                        echo Found WAR:
+                        echo %WAR_FILE%
+
+                        echo Uploading To:
+                        echo ${WAR_UPLOAD_URL}
+
+                        curl.exe ^
+                            -s ^
+                            -o nul ^
+                            -w "%%{http_code}" ^
+                            -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                            --upload-file "%WAR_FILE%" ^
+                            "${WAR_UPLOAD_URL}" > http_code.txt
+
+                        set /p HTTP_CODE=<http_code.txt
+                        del http_code.txt
+
+                        echo HTTP Response Code: %HTTP_CODE%
+
+                        if "%HTTP_CODE%"=="201" (
+                            echo Upload successful
+                            exit /b 0
+                        ) else (
+                            echo Upload failed
+                            exit /b 1
+                        )
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+
+        success {
+
+            echo '========================================'
+            echo 'Build Completed Successfully'
+            echo "Project : ${PROJECT_NAME}"
+            echo "Version : ${RELEASE_VERSION}"
+            echo "Build   : ${BUILD_NUMBER}"
+            echo '========================================'
+        }
+
+        failure {
+
+            echo '========================================'
+            echo 'Build Failed'
+            echo "Project : ${PROJECT_NAME}"
+            echo "Build   : ${BUILD_NUMBER}"
+            echo '========================================'
+        }
+
+        always {
+
+            script {
+
+                if (params.NOTIFICATION_EMAILS?.trim()) {
+
+                    emailext(
+                        to: params.NOTIFICATION_EMAILS,
+                        subject: "[${currentBuild.currentResult}] ${JOB_NAME} - Build #${BUILD_NUMBER}",
+                        body: """
+                            Project : ${PROJECT_NAME}
+                            Result  : ${currentBuild.currentResult}
+                            Build   : ${BUILD_NUMBER}
+                            Version : ${RELEASE_VERSION}
+
+                            Job URL:
+                            ${BUILD_URL}
+                        """
+                    )
+                }
+            }
+
+        }
+    }
+}

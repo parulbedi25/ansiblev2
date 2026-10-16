@@ -1,0 +1,58 @@
+---
+- name: Setup Windows Servers
+  hosts: windows
+  gather_facts: no
+
+  vars:
+    # PostgreSQL Database Variables
+ #   pg_version: "10.17-2"
+ #   pg_port: "5432"
+
+    # Shared download temporary directory (use D drive to keep C clean)
+    temp_dir: "D:\\temp"
+
+    # OpenJDK Variables
+    openjdk_version: "8"
+
+    # Redis Variables
+  #  redis_version: "2.8.2101"
+
+    # Python Variables
+  #  python_version: "3.11.4"
+
+    # Node Variables
+  #  node_version: "v10.15.1"
+
+    # Nginx Variables
+ #   nginx_version: "1.8.1"
+
+    # CouchDB Variables
+  #  couchdb_version: "3.3.3-3"
+
+    # Tomcat Variables
+ #   tomcat_version: "9.0.117"
+ #   tomcat_major_version: "9"
+ #   tomcat_zip: "apache-tomcat-{{ tomcat_version }}-windows-x64.zip"
+  #  tomcat_url: "https://dlcdn.apache.org/tomcat/tomcat-{{ tomcat_major_version }}/v{{ tomcat_version }}/bin/{{ tomcat_zip }}"
+
+  vars_files:
+    - secrets.yml
+
+  roles:
+    - hosts-entry
+    - chocolatey
+    - nssm
+   # - couchdb
+  #  - nginx
+  #  - postgres
+  #  - node
+    - openjdk
+ #   - tomcat
+    - gradle
+  #  - python
+  #  - redis
+  #  - vscode
+  #  - eclipse
+    - python-ai-service
+    - node-service
+    - git

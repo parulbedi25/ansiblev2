@@ -1,0 +1,97 @@
+---
+# tasks file for roles/pgadmin-linux
+
+- name: Check if pgAdmin4 is installed
+  stat:
+    path: /usr/pgadmin4/bin/setup-web.sh
+  register: pgadmin_installed
+
+- name: Display pgAdmin4 status
+  debug:
+    msg: "pgAdmin4 is {{ 'already installed' if pgadmin_installed.stat.exists else 'not installed' }}"
+
+- name: Install prerequisites
+  apt:
+    name:
+      - curl
+      - gnupg
+    state: present
+  when: not pgadmin_installed.stat.exists
+
+- name: Add pgAdmin4 GPG key
+  shell: |
+    curl -fsS https://www.pgadmin.org/static/packages_pgadmin_org.pub | gpg --dearmor -o /usr/share/keyrings/packages-pgadmin-org.gpg
+  args:
+    creates: /usr/share/keyrings/packages-pgadmin-org.gpg
+  when: not pgadmin_installed.stat.exists
+
+- name: Get Ubuntu codename
+  command: lsb_release -cs
+  register: ubuntu_codename
+  changed_when: false
+
+- name: Add pgAdmin4 repository
+  copy:
+    content: "deb [signed-by=/usr/share/keyrings/packages-pgadmin-org.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/{{ ubuntu_codename.stdout }} pgadmin4 main\n"
+    dest: /etc/apt/sources.list.d/pgadmin4.list
+    mode: '0644'
+  when: not pgadmin_installed.stat.exists
+
+- name: Update apt cache after adding pgAdmin4 repo
+  apt:
+    update_cache: yes
+  when: not pgadmin_installed.stat.exists
+
+- name: Install pgadmin4-web
+  apt:
+    name: pgadmin4-web
+    state: present
+  when: not pgadmin_installed.stat.exists
+
+- name: Configure Apache to listen on pgAdmin port (avoid conflict with nginx on port 80)
+  lineinfile:
+    path: /etc/apache2/ports.conf
+    regexp: '^Listen 80'
+    line: 'Listen {{ pgadmin_port }}'
+    backup: yes
+
+- name: Update Apache default site to use pgAdmin port
+  replace:
+    path: /etc/apache2/sites-available/000-default.conf
+    regexp: '<VirtualHost \*:80>'
+    replace: '<VirtualHost *:{{ pgadmin_port }}>'
+
+- name: Remove existing pgAdmin4 database to ensure credentials are always set correctly
+  file:
+    path: /var/lib/pgadmin/pgadmin4.db
+    state: absent
+
+- name: Setup pgAdmin4 web (set admin credentials)
+  shell: /usr/pgadmin4/bin/setup-web.sh --yes
+  environment:
+    PGADMIN_SETUP_EMAIL: "{{ pgadmin_email }}"
+    PGADMIN_SETUP_PASSWORD: "{{ pgadmin_password }}"
+  become: yes
+
+- name: Enable and restart Apache service
+  systemd:
+    name: apache2
+    enabled: yes
+    state: restarted
+
+- name: Wait for pgAdmin4 to be available
+  wait_for:
+    port: "{{ pgadmin_port }}"
+    timeout: 30
+
+- name: Verify pgAdmin4 is accessible
+  uri:
+    url: "http://localhost:{{ pgadmin_port }}/pgadmin4"
+    status_code: 200
+    timeout: 30
+  register: pgadmin_verify
+  failed_when: false
+
+- name: Display pgAdmin4 access status
+  debug:
+    msg: "pgAdmin4 is {{ 'accessible' if pgadmin_verify.status == 200 else 'not responding' }} at http://{{ ansible_default_ipv4.address }}:{{ pgadmin_port }}/pgadmin4"

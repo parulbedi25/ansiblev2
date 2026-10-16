@@ -1,0 +1,181 @@
+---
+# tasks file for roles/redis-linux
+- name: Check if Redis service is running
+  systemd:
+    name: redis
+  register: redis_service_check
+  failed_when: false
+
+- name: Display Redis status
+  debug:
+    msg: "Redis service is {{ redis_service_check.status.ActiveState | default('not running') }}"
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Install required packages
+  apt:
+    name: "{{ ubuntu_packages }}"
+    state: present
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Create source directory
+  file:
+    path: /usr/local/src
+    state: directory
+    mode: '0755'
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Download Redis {{ redis_version }} source
+  get_url:
+    url: "{{ redis_url }}"
+    dest: "/usr/local/src/{{ redis_archive }}"
+    mode: '0644'
+    timeout: 300
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Extract Redis source
+  unarchive:
+    src: "/usr/local/src/{{ redis_archive }}"
+    dest: /usr/local/src
+    remote_src: yes
+    creates: "{{ redis_src_dir }}"
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Compile Redis
+  command: make
+  args:
+    chdir: "{{ redis_src_dir }}"
+    creates: "{{ redis_src_dir }}/src/redis-server"
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Install Redis
+  command: make install
+  args:
+    chdir: "{{ redis_src_dir }}"
+    creates: /usr/local/bin/redis-server
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Create Redis user
+  user:
+    name: redis
+    system: yes
+    shell: /bin/false
+    home: "{{ redis_install_dir }}"
+    create_home: no
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Create Redis directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: redis
+    group: redis
+    mode: '0755'
+  loop:
+    - "{{ redis_install_dir }}"
+    - "{{ redis_install_dir }}/conf"
+    - "{{ redis_install_dir }}/data"
+    - "{{ redis_install_dir }}/logs"
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Copy Redis configuration
+  copy:
+    src: "{{ redis_src_dir }}/redis.conf"
+    dest: "{{ redis_install_dir }}/conf/redis.conf"
+    owner: redis
+    group: redis
+    mode: '0644'
+    remote_src: yes
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Update Redis configuration for systemd
+  lineinfile:
+    path: "{{ redis_install_dir }}/conf/redis.conf"
+    regexp: '^daemonize no'
+    line: 'daemonize no'
+    backup: yes
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Update Redis configuration for data directory
+  lineinfile:
+    path: "{{ redis_install_dir }}/conf/redis.conf"
+    regexp: '^dir \./'
+    line: 'dir {{ redis_install_dir }}/data'
+    backup: yes
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Update Redis configuration for logfile
+  lineinfile:
+    path: "{{ redis_install_dir }}/conf/redis.conf"
+    regexp: '^logfile ""'
+    line: 'logfile {{ redis_install_dir }}/logs/redis.log'
+    backup: yes
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Create Redis systemd service file
+  copy:
+    dest: /etc/systemd/system/redis.service
+    content: |
+      [Unit]
+      Description=Redis In-Memory Data Store
+      After=network.target
+
+      [Service]
+      User=redis
+      Group=redis
+      ExecStart=/usr/local/bin/redis-server {{ redis_install_dir }}/conf/redis.conf
+      ExecStop=/usr/local/bin/redis-cli shutdown
+      Restart=always
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Reload systemd after creating Redis service file
+  systemd:
+    daemon_reload: yes
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Enable Redis service
+  systemd:
+    name: redis
+    enabled: yes
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Start Redis service
+  systemd:
+    name: redis
+    state: started
+  when: redis_service_check.status.ActiveState != "active"
+
+- name: Wait for Redis to start
+  wait_for:
+    port: 6379
+    timeout: 30
+
+- name: Verify Redis installation
+  command: redis-cli ping
+  register: redis_ping
+  changed_when: false
+  failed_when: false
+
+- debug:
+    msg: "Redis ping response: {{ redis_ping.stdout }}"
+
+- name: Check Redis service status
+  systemd:
+    name: redis
+  register: redis_service
+
+- debug:
+    msg: "Redis service status: {{ redis_service.status.ActiveState }}"
+
+- name: Clean up downloaded archive
+  file:
+    path: "/usr/local/src/{{ redis_archive }}"
+    state: absent

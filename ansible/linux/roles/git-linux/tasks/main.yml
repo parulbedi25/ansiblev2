@@ -1,0 +1,29 @@
+---
+# tasks file for roles/git-linux
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Install Git
+  apt:
+    name: git
+    state: "{{ 'latest' if git_version == 'latest' else 'present' }}"
+
+- name: Verify Git installation
+  command: git --version
+  register: git_verify
+  changed_when: false
+  failed_when: false
+
+- name: Display Git version
+  debug:
+    msg: "Git version: {{ git_verify.stdout | trim }}"
+  when: git_verify.rc == 0
+
+- name: Fail if Git is not installed
+  fail:
+    msg: >
+      Git is not installed or not available in PATH.
+      Please install Git before continuing.
+  when: git_verify.rc != 0

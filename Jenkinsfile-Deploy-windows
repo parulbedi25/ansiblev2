@@ -1,0 +1,881 @@
+pipeline {
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            description: 'Jenkins agent label where the application will be deployed. Format: project-environment-ip (example: copper-dev-10.10.3.150). Ensure the label exactly matches an existing Jenkins node.'
+        )
+        string(
+            name: 'BUILD_VERSION',
+            description: 'Specify the build version to deploy. Required format: dd-MM-yyyy-v1.0.0-BuildNumber (example: 17-02-2026-v1.0.0-175).'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+    }
+
+    environment {
+        PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+        TOMCAT_HOME          = 'D:\\QASIP\\Apps\\tomcat'
+        TOMCAT_WEBAPPS       = 'D:\\QASIP\\Apps\\tomcat\\webapps'
+        TOMCAT_ROOT          = 'D:\\QASIP\\Apps\\tomcat\\webapps\\ROOT'
+        TOMCAT_LOGS          = 'D:\\QASIP\\Apps\\tomcat\\logs'
+        NGINX_ROOT_DIR       = 'D:\\QASIP\\Apps\\nginx'
+        NGINX_HTML_DIR       = 'D:\\QASIP\\Apps\\nginx\\html'
+        AI_DEPLOY_DIR        = 'D:\\QASIP\\Apps\\python-ai-service'
+        AI_APP_DIR           = 'D:\\QASIP\\Apps\\python-ai-service\\test_script_generator'
+        NODE_DEPLOY_DIR      = 'D:\\QASIP\\Apps\\node-service'
+        ANSIBLE_OS           = "windows"
+        // Python path is detected dynamically in the Setup stage (supports any machine/username)
+    }
+
+    stages {
+        
+        stage('Validate Parameters') {
+            steps {
+                script {
+        
+                    def missingParams = []
+                    def formatErrors  = []
+        
+                    def targetMachine = params.PROJECT_TARGET_MACHINE?.trim()?.toLowerCase()
+                    def buildVersion  = params.BUILD_VERSION?.trim()
+                    def notificationEmails = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+        
+                    // -----------------------------
+                    // Check missing
+                    // -----------------------------
+                    if (!targetMachine) {
+                        missingParams << "PROJECT_TARGET_MACHINE"
+                    }
+        
+                    if (!buildVersion) {
+                        missingParams << "BUILD_VERSION"
+                    }
+                    if (!notificationEmails) {
+                        missingParams << "NOTIFICATION_EMAILS"
+                    }
+        
+                    // -----------------------------
+                    // Validate PROJECT_TARGET_MACHINE
+                    // -----------------------------
+                    if (targetMachine) {
+        
+                        def machineRegex = /^[a-z]+-[a-z]+-(\d{1,3}\.){3}\d{1,3}$/
+        
+                        if (!(targetMachine ==~ machineRegex)) {
+                            formatErrors << "PROJECT_TARGET_MACHINE format is invalid"
+                        } else {
+                            // Validate IP range (0-255)
+                            def ipPart = targetMachine.tokenize('-')[-1]
+                            def octets = ipPart.tokenize('.')
+        
+                            for (octet in octets) {
+                                if (octet.toInteger() > 255) {
+                                    formatErrors << "PROJECT_TARGET_MACHINE contains invalid IP address"
+                                    break
+                                }
+                            }
+                        }
+                    }
+        
+                    // -----------------------------
+                    // Validate BUILD_VERSION
+                    // -----------------------------
+                    if (buildVersion) {
+        
+                        def versionRegex = /^(0[1-9]|[12][0-9]|3[01])-(0[1-9]|1[0-2])-\d{4}-v\d+\.\d+\.\d+-\d+$/
+        
+                        if (!(buildVersion ==~ versionRegex)) {
+                            formatErrors << "BUILD_VERSION format is invalid"
+                        }
+                    }
+        
+                    // -----------------------------
+                    // Validate NOTIFICATION_EMAILS
+                    // -----------------------------
+                    if (notificationEmails) {
+
+                        def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+                        def emailList = notificationEmails
+                                            .split(',')
+                                            .collect { it.trim() }
+                                            .findAll { it }
+
+                        // Check duplicates
+                        if (emailList.size() != emailList.unique().size()) {
+                            formatErrors << "Duplicate email addresses found in NOTIFICATION_EMAILS"
+                        }
+
+                        // Validate format
+                        for (email in emailList) {
+                            if (!(email ==~ emailRegex)) {
+                                formatErrors << "Invalid email format detected: ${email}"
+                            }
+                        }
+                    }
+
+                    // -----------------------------
+                    // Final validation result
+                    // -----------------------------
+                    if (missingParams || formatErrors) {
+        
+                        error """
+        ====================================================
+        ❌ BUILD FAILED - Parameter Validation Error
+        ====================================================
+        
+        ${missingParams ? "Missing Parameters:\n${missingParams.join('\n')}\n" : ""}
+        ${formatErrors ? "Format Errors:\n${formatErrors.join('\n')}\n" : ""}
+        
+        Expected Formats:
+        
+        PROJECT_TARGET_MACHINE:
+        project-environment-ip
+        Example:
+        copper-dev-10.10.3.150
+        
+        BUILD_VERSION:
+        dd-MM-yyyy-v1.0.0-BuildNumber
+        Example:
+        17-02-2026-v1.0.0-175
+        
+        NOTIFICATION_EMAILS:
+        Comma-separated valid email addresses
+        Example:
+        user1@qasource.com, user2@qasource.com
+        ====================================================
+        """
+                    }
+        
+                    echo "✅ All parameters validated successfully."
+                    echo "Target Machine → ${targetMachine}"
+                    echo "Build Version  → ${buildVersion}"
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 0: Stop all running services
+        // =============================================
+        stage('Stop All Services') {
+            steps {
+                bat '''
+                    @echo off
+                    echo ========================================
+                    echo Stopping All Running Services
+                    echo ========================================
+
+                    echo [1/4] Stopping ATMS-Python-AI service...
+                    net stop ATMS-Python-AI 2>nul || echo ATMS-Python-AI was not running
+                    echo Killing any remaining Python processes...
+                    taskkill /F /IM python.exe 2>nul || echo No Python process found
+                    taskkill /F /IM pythonw.exe 2>nul || echo No Pythonw process found
+
+                    echo [2/4] Stopping ATMS-Node-Microservice service...
+                    net stop ATMS-Node-Microservice 2>nul || echo ATMS-Node-Microservice was not running
+                    taskkill /F /IM node.exe 2>nul || echo No Node process found
+
+                    echo [3/4] Stopping Tomcat service...
+                    net stop ApacheTomcat9 2>nul || echo Tomcat was not running
+
+                    echo [4/4] Stopping Nginx...
+                    cd /d "%NGINX_ROOT_DIR%"
+                    nginx -s quit 2>nul
+                    ping 127.0.0.1 -n 3 > nul
+                    taskkill /F /IM nginx.exe 2>nul || echo Nginx was not running
+
+                    echo Waiting for processes to release file locks...
+                    ping 127.0.0.1 -n 10 > nul
+
+                    echo All services stopped.
+                    echo ========================================
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 1: Download all artifacts from Nexus
+        // =============================================
+        stage('Download Artifacts from Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        // AI-Python Artifact
+						def projectName = params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]
+                        bat """
+                            @echo off
+                            setlocal 
+
+                            set "ARTIFACT_DIR=%AI_DEPLOY_DIR%"
+
+                            echo ========================================
+                            echo Preparing AI-Python Artifact Directory
+                            echo ========================================
+
+                            if exist "%ARTIFACT_DIR%" (
+                                echo Cleaning existing artifact contents...
+                                for /d %%D in ("%ARTIFACT_DIR%\\*") do rmdir /S /Q "%%D"
+                                del /F /Q "%ARTIFACT_DIR%\\*.*" 2>nul
+                            ) else (
+                                mkdir "%ARTIFACT_DIR%"
+                                if %ERRORLEVEL% NEQ 0 (
+                                    echo ERROR: Failed to create artifact directory
+                                    exit /b 1
+                                )
+                            )
+
+                            echo Downloading AI-Python.zip (version: ${params.BUILD_VERSION})...
+
+                            curl.exe --fail --silent --show-error ^
+							  -u "%NEXUS_USER%:%NEXUS_PASSWORD%" ^
+							  -o "%ARTIFACT_DIR%\\AI-Python.zip" ^
+							  "${env.NEXUS_URL}/repository/${env.NEXUS_REPO}/${projectName}/windows/${params.BUILD_VERSION}/AI-Python/AI-Python.zip"
+							  
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to download AI-Python artifact
+                                exit /b 1
+                            )
+
+                            echo Extracting AI-Python artifact...
+                            powershell -Command "Expand-Archive -Force '%ARTIFACT_DIR%\\AI-Python.zip' '%ARTIFACT_DIR%'"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to extract AI-Python artifact
+                                exit /b 1
+                            )
+
+                            del "%ARTIFACT_DIR%\\AI-Python.zip"
+
+                            echo AI-Python artifact ready at %ARTIFACT_DIR%
+                        """
+
+                        // Node Microservice Artifact
+                        bat """
+                            @echo off
+                            setlocal 
+
+                            set "ARTIFACT_DIR=%NODE_DEPLOY_DIR%"
+
+                            echo ========================================
+                            echo Preparing Node Microservice Artifact Directory
+                            echo ========================================
+
+                            if exist "%ARTIFACT_DIR%" (
+                                echo Cleaning existing artifact contents...
+                                for /d %%D in ("%ARTIFACT_DIR%\\*") do rmdir /S /Q "%%D"
+                                del /F /Q "%ARTIFACT_DIR%\\*.*" 2>nul
+                            ) else (
+                                mkdir "%ARTIFACT_DIR%"
+                                if %ERRORLEVEL% NEQ 0 (
+                                    echo ERROR: Failed to create artifact directory
+                                    exit /b 1
+                                )
+                            )
+
+                            echo Downloading atms-node-microservice.zip (version: ${params.BUILD_VERSION})...
+
+                            curl.exe --fail --silent --show-error ^
+							  -u "%NEXUS_USER%:%NEXUS_PASSWORD%" ^
+							  -o "%ARTIFACT_DIR%\\node-microservice.zip" ^
+							  "${env.NEXUS_URL}/repository/${env.NEXUS_REPO}/${projectName}/windows/${params.BUILD_VERSION}/atms-node-microservice/atms-node-microservice.zip"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to download node microservice artifact
+                                exit /b 1
+                            )
+
+                            echo Extracting node microservice artifact...
+                            powershell -Command "Expand-Archive -Force '%ARTIFACT_DIR%\\node-microservice.zip' '%ARTIFACT_DIR%'"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to extract node microservice artifact
+                                exit /b 1
+                            )
+
+                            del "%ARTIFACT_DIR%\\node-microservice.zip"
+
+                            echo Node microservice artifact ready at %ARTIFACT_DIR%
+                        """
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 2: Setup Python venv and install deps
+        // =============================================
+        stage('Setup Virtual Environment and Install Dependencies') {
+            steps {
+                bat '''
+                    @echo off
+                    setlocal EnableDelayedExpansion
+                    echo ========================================
+                    echo Setting up Python Virtual Environment
+                    echo ========================================
+
+                    REM -------------------------------------------------------
+                    REM Detect Python - tries PATH, system installs, all users
+                    REM -------------------------------------------------------
+                    set PYTHON_EXE=
+
+                    REM Step 1: Try system PATH (skip WindowsApps stub)
+                    for /f "tokens=*" %%i in ('where python 2^>nul') do (
+                        if "!PYTHON_EXE!"=="" (
+                            echo %%i | findstr /I "WindowsApps" >nul
+                            if errorlevel 1 set PYTHON_EXE=%%i
+                        )
+                    )
+
+                    REM Step 2: Check common system-wide install locations
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Python311\\python.exe"             set PYTHON_EXE=C:\\Python311\\python.exe
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Python312\\python.exe"             set PYTHON_EXE=C:\\Python312\\python.exe
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Python310\\python.exe"             set PYTHON_EXE=C:\\Python310\\python.exe
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Program Files\\Python311\\python.exe" set "PYTHON_EXE=C:\\Program Files\\Python311\\python.exe"
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Program Files\\Python312\\python.exe" set "PYTHON_EXE=C:\\Program Files\\Python312\\python.exe"
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Program Files\\Python310\\python.exe" set "PYTHON_EXE=C:\\Program Files\\Python310\\python.exe"
+
+                    REM Step 3: Scan all user profiles (covers per-user installs e.g. C:\\Users\\copper\\...)
+                    if "!PYTHON_EXE!"=="" (
+                        for /d %%u in ("C:\\Users\\*") do (
+                            for /d %%v in ("%%u\\AppData\\Local\\Programs\\Python\\*") do (
+                                if "!PYTHON_EXE!"=="" if exist "%%v\\python.exe" set PYTHON_EXE=%%v\\python.exe
+                            )
+                        )
+                    )
+
+                    if "!PYTHON_EXE!"=="" (
+                        echo ERROR: Python not found on this machine.
+                        echo Searched: system PATH, C:\\Python3xx, C:\\Program Files\\Python3xx, C:\\Users\\*\\AppData\\Local\\Programs\\Python\\*
+                        echo Please install Python 3.11 for all users or add it to the system PATH.
+                        exit /b 1
+                    )
+
+                    echo Found Python at: !PYTHON_EXE!
+                    "!PYTHON_EXE!" --version
+
+                    cd /d "%AI_APP_DIR%"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Cannot navigate to %AI_APP_DIR%
+                        exit /b 1
+                    )
+
+                    REM Delete old environment if exists
+                    if exist ai_aenv (
+                        echo Removing existing virtual environment...
+                        rmdir /S /Q ai_aenv
+                        if exist ai_aenv (
+                            echo ERROR: Failed to delete old environment
+                            exit /b 1
+                        )
+                        echo Old environment removed
+                    )
+
+                    REM Create new environment using detected Python
+                    echo Creating new virtual environment...
+                    "!PYTHON_EXE!" -m venv ai_aenv
+
+                    if not exist ai_aenv (
+                        echo ERROR: Failed to create virtual environment
+                        exit /b 1
+                    )
+
+                    echo Virtual environment created successfully
+
+                    echo Activating virtual environment and installing dependencies
+                    call ai_aenv\\Scripts\\activate
+
+                    REM Fix permissions if package exists
+                    if exist model_integration-1.0.0.tar.gz (
+                        echo Fixing permissions for model_integration-1.0.0.tar.gz
+                        icacls "model_integration-1.0.0.tar.gz" /grant "%USERNAME%":F
+                    )
+
+                    REM Install from the correct requirements file
+                    pip install -r Letest_requirements.txt
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to install dependencies from Letest_requirements.txt
+                        exit /b 1
+                    )
+                    pip install "flask[async]"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to install flask[async]
+                        exit /b 1
+                    )
+                    echo ========================================
+                    echo Environment Ready - Dependencies installed successfully
+                    echo ========================================
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 3: Run Python Application
+        // =============================================
+        stage('Run Python Application') {
+            steps {
+                bat '''
+                    @echo off
+                    echo ========================================
+                    echo Starting Python AI Application
+                    echo ========================================
+
+                    echo Ensuring logs folder exists...
+                    if not exist "%AI_APP_DIR%\\logs" (
+                        mkdir "%AI_APP_DIR%\\logs"
+                        echo logs folder created
+                    ) else (
+                        echo logs folder already exists
+                    )
+
+                    echo Repairing ATMS-Python-AI service paths...
+                    nssm set ATMS-Python-AI Application "%AI_APP_DIR%\\ai_aenv\\Scripts\\python.exe"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to set Python service Application path
+                        exit /b 1
+                    )
+
+                    nssm set ATMS-Python-AI AppDirectory "%AI_APP_DIR%"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to set Python service AppDirectory
+                        exit /b 1
+                    )
+
+                    nssm set ATMS-Python-AI AppParameters "%AI_APP_DIR%\\run.py"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to set Python service AppParameters
+                        exit /b 1
+                    )
+
+                    nssm set ATMS-Python-AI AppStdout "%AI_APP_DIR%\\logs\\stdout.log"
+                    nssm set ATMS-Python-AI AppStderr "%AI_APP_DIR%\\logs\\stderr.log"
+                    nssm set ATMS-Python-AI AppRotateFiles 1
+                    nssm set ATMS-Python-AI AppRotateBytes 10485760
+                    nssm set ATMS-Python-AI AppEnvironmentExtra "GIT_PYTHON_REFRESH=quiet"
+
+                    echo Starting ATMS-Python-AI service...
+                    net start ATMS-Python-AI
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to start ATMS-Python-AI service
+                        echo Current NSSM configuration:
+                        nssm get ATMS-Python-AI Application
+                        nssm get ATMS-Python-AI AppDirectory
+                        nssm get ATMS-Python-AI AppParameters
+                        exit /b 1
+                    )
+
+                    ping 127.0.0.1 -n 8 > nul
+
+                    echo Verifying service is running...
+                    sc query ATMS-Python-AI | findstr "RUNNING"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: ATMS-Python-AI service is not running
+                        exit /b 1
+                    )
+
+                    echo Python AI Application started successfully
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 4: Deploy Node.js Microservice
+        // =============================================
+        stage('Deploy Node.js Microservice') {
+            steps {
+                bat '''
+                    @echo off
+                    echo ========================================
+                    echo Starting Node.js Microservice
+                    echo ========================================
+
+                    echo Ensuring logs folder exists...
+                    if not exist "%NODE_DEPLOY_DIR%\\logs" (
+                        mkdir "%NODE_DEPLOY_DIR%\\logs"
+                        echo logs folder created
+                    ) else (
+                        echo logs folder already exists
+                    )
+
+                    echo Starting ATMS-Node-Microservice...
+                    net start ATMS-Node-Microservice
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to start ATMS-Node-Microservice
+                        exit /b 1
+                    )
+
+                    ping 127.0.0.1 -n 8 > nul
+
+                    echo Verifying service is running...
+                    sc query ATMS-Node-Microservice | findstr "RUNNING"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: ATMS-Node-Microservice is not running
+                        exit /b 1
+                    )
+
+                    echo Node.js microservice started successfully
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 5: Deploy WAR to Tomcat
+        // =============================================
+        stage('Deploy to Tomcat') {
+            steps {
+                bat """
+                    @echo off
+                    echo Removing old ROOT directory...
+                    cd /d "%TOMCAT_WEBAPPS%"
+
+                    if exist ROOT (
+                        rmdir /S /Q ROOT
+                        ping 127.0.0.1 -n 3 > nul
+
+                        if exist ROOT (
+                            echo ERROR: Failed to remove ROOT directory
+                            exit /b 1
+                        ) else (
+                            echo ROOT directory removed
+                        )
+                    )
+
+                    if exist ROOT.war (
+                        del /F /Q ROOT.war
+                        echo ROOT.war removed
+                    )
+                """
+
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-credentials',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    bat """
+                        @echo off
+                        echo Downloading WAR from Nexus...
+                        echo Repository: ${NEXUS_REPO}
+                        echo Version: ${params.BUILD_VERSION}
+
+                        cd /d "%TOMCAT_WEBAPPS%"
+
+                        curl.exe -f -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                          -o ROOT.war ^
+                          "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${params.BUILD_VERSION}/atms-app/ROOT.war"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download WAR file from Nexus
+                            exit /b 1
+                        )
+
+                        echo WAR file downloaded successfully
+
+                        if exist ROOT.war (
+                            dir ROOT.war
+                        ) else (
+                            echo ERROR: ROOT.war file not found
+                            exit /b 1
+                        )
+                    """
+                }
+
+                bat """
+                    @echo off
+                    echo Starting Tomcat service...
+                    cd /d "%TOMCAT_WEBAPPS%"
+
+                    net start ApacheTomcat9
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to start Tomcat service
+                        exit /b 1
+                    ) else (
+                        echo Tomcat service started
+                    )
+
+                    echo Waiting for Tomcat to initialize...
+                    ping 127.0.0.1 -n 30 > nul
+
+                    echo Verifying deployment...
+                    if exist ROOT (
+                        echo ROOT directory created successfully
+
+                        if exist ROOT\\WEB-INF (
+                            echo WEB-INF directory exists
+
+                            if exist ROOT\\WEB-INF\\web.xml (
+                                echo web.xml found
+                            ) else (
+                                echo WARNING: web.xml NOT FOUND
+                            )
+                        ) else (
+                            echo ERROR: WEB-INF not found!
+                        )
+                    ) else (
+                        echo ERROR: ROOT directory not created!
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo ========================================
+                    echo Tomcat Deployment Completed
+                    echo ========================================
+                    echo Version: ${params.BUILD_VERSION}
+                    echo URL: http://localhost:8080
+                    echo.
+                """
+            }
+        }
+
+        // =============================================
+        // STAGE 6: Deploy UI to Nginx
+        // =============================================
+        stage('Deploy to Nginx') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'nexus-credentials',
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        bat """
+                            @echo off
+                            echo ========================================
+                            echo Deploying atms-ui to Nginx
+                            echo Version: ${params.BUILD_VERSION}
+                            echo ========================================
+
+                            echo Cleaning Nginx HTML directory...
+                            cd /d "%NGINX_HTML_DIR%"
+                            del /F /Q /A /S *.* >nul 2>&1
+                            for /d %%p in (*) do rmdir "%%p" /S /Q
+                            echo Directory cleaned
+
+                            echo Downloading UI from Nexus...
+                            set TEMP_DIR=%TEMP%\\atms-ui-deploy
+                            if exist "%TEMP_DIR%" rmdir /S /Q "%TEMP_DIR%"
+                            mkdir "%TEMP_DIR%"
+
+                            curl.exe -f -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                              -o "%TEMP_DIR%\\atms-ui-dist.tar.gz" ^
+                              "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${params.BUILD_VERSION}/atms-ui/atms-ui-dist.tar.gz"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to download UI from Nexus
+                                rmdir /S /Q "%TEMP_DIR%"
+                                exit /b 1
+                            )
+                            echo Downloaded successfully
+
+                            echo Extracting archive...
+                            cd /d "%TEMP_DIR%"
+                            tar -xzf atms-ui-dist.tar.gz
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to extract archive
+                                exit /b 1
+                            )
+
+                            del /Q atms-ui-dist.tar.gz
+                            echo Archive extracted
+
+                            echo Deploying to Nginx...
+                            robocopy "%TEMP_DIR%" "%NGINX_HTML_DIR%" /E /IS /IT /R:3 /W:5
+                            if %ERRORLEVEL% GEQ 8 (
+                                echo ERROR: Failed to copy files to Nginx
+                                exit /b 1
+                            )
+
+                            rmdir /S /Q "%TEMP_DIR%" 2>nul
+                            echo Files deployed
+
+                            REM Delete stale PID file left by force-kill (causes nginx to exit immediately on restart)
+                            del /F /Q "%NGINX_ROOT_DIR%\\logs\\nginx.pid" 2>nul
+                            echo Stale PID file cleared
+
+                            echo Starting Nginx...
+                            REM Check if wmic is available on this machine
+                            where wmic >nul 2>&1
+                            if %ERRORLEVEL% EQU 0 (
+                                echo wmic found - starting Nginx directly via wmic...
+                                wmic process call create "\\"%NGINX_ROOT_DIR%\\nginx.exe\\" -p \\"%NGINX_ROOT_DIR%\\"" >nul 2>&1
+                            ) else (
+                                echo wmic not found - starting Nginx via start command...
+                                set BUILD_ID=dontKillMe
+                                set JENKINS_NODE_COOKIE=dontKillMe
+                                start "" /D "%NGINX_ROOT_DIR%" "%NGINX_ROOT_DIR%\\nginx.exe"
+                            )
+                            ping 127.0.0.1 -n 5 > nul
+
+                            echo Verifying Nginx is running...
+                            tasklist /FI "IMAGENAME eq nginx.exe" | findstr /I nginx.exe
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Nginx failed to start
+                                echo ---- nginx error log ----
+                                type "%NGINX_ROOT_DIR%\\logs\\error.log" 2>nul
+                                echo -------------------------
+                                exit /b 1
+                            )
+
+                            echo.
+                            echo ========================================
+                            echo Nginx Deployment Completed
+                            echo ========================================
+                            echo Location: %NGINX_HTML_DIR%
+                            echo Version: ${params.BUILD_VERSION}
+                            echo URL: http://localhost:6003
+                            echo.
+
+                            echo Deployed files:
+                            dir /B "%NGINX_HTML_DIR%"
+                            echo.
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    // -----------------------------
+                    // 1️⃣ Read Current Version
+                    // -----------------------------
+                    def currentVersion = bat(
+                        script: '''
+                        @echo off
+                        if exist C:\\app\\version.txt (
+                            type C:\\app\\version.txt
+                        ) else (
+                            echo none
+                        )
+                        ''',
+                        returnStdout: true
+                    ).trim()
+                    // -----------------------------
+                    // 2️⃣ Ensure Directory Exists
+                    // -----------------------------
+                    bat """
+                    if not exist C:\\app (
+                        mkdir C:\\app
+                    )
+                    """
+                    // -----------------------------
+                    // 3️⃣ Update Version File
+                    // -----------------------------
+                    bat """
+                    echo ${params.BUILD_VERSION} > C:\\app\\version.txt
+                    """
+                    // -----------------------------
+                    // 4️⃣ Console Summary
+                    // -----------------------------
+                    echo """
+        ========================================
+                DEPLOYMENT SUCCESSFUL
+        ========================================
+        Previous Version : ${currentVersion}
+        New Version      : ${params.BUILD_VERSION}
+
+        All components deployed successfully:
+
+        - Python AI Application : Running
+        - Node.js Microservice  : Running on port 4001
+        - atms-web (v${params.BUILD_VERSION}) : http://localhost:8080
+        - atms-ui  (v${params.BUILD_VERSION}) : http://localhost:6003
+
+        ========================================
+        """
+                // }
+
+                // 5️⃣ Send Email
+                // script {
+                def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+
+                bat """
+                @echo off
+                node C:\\Windows\\Scripts\\sendDeploymentEmail.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="${params.NOTIFICATION_EMAILS}" --targetMachine="${params.PROJECT_TARGET_MACHINE}" --buildVersion="${params.BUILD_VERSION}" --osType=%ANSIBLE_OS% --currentVersion="${currentVersion}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                """
+
+                // sleep(time: 4, unit: 'SECONDS')
+
+                // bat """
+                // @echo off
+                // node C:\\Windows\\Scripts\\sendDeploymentEmail-devops.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --targetMachine="${params.PROJECT_TARGET_MACHINE}" --buildVersion="${params.BUILD_VERSION}" --osType=%ANSIBLE_OS% --currentVersion="${currentVersion}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                // """
+                }
+            }
+        }
+
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+
+                    // Read version for logging (optional)
+                    def currentVersion = bat(
+                        script: '''
+                        @echo off
+                        if exist C:\\app\\version.txt (
+                            type C:\\app\\version.txt
+                        ) else (
+                            echo none
+                        )
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    echo """
+        ========================================
+                DEPLOYMENT FAILED
+        ========================================
+        Attempted Version : ${params.BUILD_VERSION}
+        Current Version   : ${currentVersion}
+
+        Deployment did NOT complete.
+        Version file was NOT modified.
+
+        Check logs above for root cause.
+        ========================================
+        """
+                // def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+                // bat """
+                // @echo off
+                // node C:\\Windows\\Scripts\\sendDeploymentEmail-devops.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="usguleria@qasource.com" --targetMachine="${params.PROJECT_TARGET_MACHINE}" --buildVersion="${params.BUILD_VERSION}" --osType=%ANSIBLE_OS% --currentVersion="${currentVersion}" --executionTime="${executionTime}" --status="failure" --runUrl="${env.BUILD_URL}"
+                // """
+                    }
+                }   
+            }
+    }
+}

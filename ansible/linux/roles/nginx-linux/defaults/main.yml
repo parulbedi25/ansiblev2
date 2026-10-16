@@ -1,0 +1,19 @@
+---
+# defaults file for roles/nginx-linux
+nginx_version: "1.8.1"
+nginx_install_prefix: "/usr/local/nginx"
+nginx_port: 6003
+nginx_conf_dir: "{{ nginx_install_prefix }}/conf"
+nginx_log_dir: "{{ nginx_install_prefix }}/logs"
+nginx_pid_file: "{{ nginx_install_prefix }}/logs/nginx.pid"
+nginx_html_root: "{{ nginx_install_prefix }}/html"
+# User for source-compiled nginx; overridden to www-data when system nginx (apt) is detected
+nginx_worker_user: "nginx"
+
+# Backend API configuration (used in nginx.conf.j2 template)
+# Overridden by IP_ADDRESS parameter from Jenkinsfile.provisioning via -e flag
+backend_api_host: "{{ ansible_host }}"
+backend_api_port: "8080"
+
+# Nginx listen port (used in nginx.conf.j2 template)
+nginx_listen_port: "6003"

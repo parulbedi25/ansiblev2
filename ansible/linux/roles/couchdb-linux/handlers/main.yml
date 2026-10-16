@@ -1,0 +1,23 @@
+---
+# handlers file for roles/couchdb-linux
+- name: restart couchdb
+  systemd:
+    name: couchdb
+    state: restarted
+    daemon_reload: yes
+
+- name: reload couchdb
+  systemd:
+    name: couchdb
+    state: reloaded
+
+- name: start couchdb
+  systemd:
+    name: couchdb
+    state: started
+    enabled: yes
+
+- name: stop couchdb
+  systemd:
+    name: couchdb
+    state: stopped

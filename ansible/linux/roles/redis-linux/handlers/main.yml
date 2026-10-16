@@ -1,0 +1,21 @@
+---
+# handlers file for roles/redis-linux
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart redis
+  systemd:
+    name: redis
+    state: restarted
+
+- name: start redis
+  systemd:
+    name: redis
+    state: started
+    enabled: yes
+
+- name: stop redis
+  systemd:
+    name: redis
+    state: stopped

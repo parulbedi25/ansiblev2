@@ -1,0 +1,11 @@
+---
+# tasks file for hosts-entry
+- name: Add entries to Windows hosts file
+  win_lineinfile:
+    path: C:\Windows\System32\drivers\etc\hosts
+    line: "{{ item.ip }}    {{ item.hostname }}"
+    regexp: ".*\\s+{{ item.hostname | regex_escape }}$"
+    state: present
+  loop: "{{ hosts_entries }}"
+  loop_control:
+    label: "{{ item.ip }} -> {{ item.hostname }}"

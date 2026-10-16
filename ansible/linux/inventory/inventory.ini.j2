@@ -1,0 +1,9 @@
+[linux]
+target ansible_host="{{ ANSIBLE_IP_ADDRESS }}"
+
+[linux:vars]
+ansible_user="{{ ANSIBLE_USER }}"
+ansible_password="{{ ANSIBLE_PASSWORD }}"
+ansible_connection=ssh
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'

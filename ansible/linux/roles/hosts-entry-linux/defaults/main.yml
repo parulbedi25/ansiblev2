@@ -1,0 +1,11 @@
+---
+# defaults file for hosts-entry-linux
+# backend_api_host and instance_name are passed from Jenkinsfile.provisioning via -e flag
+instance_name: "{{ project_name | default('default') }}"
+
+# host entries use backend_api_host (passed via -e from Jenkins IP_ADDRESS param)
+hosts_entries:
+  - hostname: "qajarvis.com"
+    ip: "{{ backend_api_host }}"
+  - hostname: "{{ instance_name | lower }}.qajarvis.com"
+    ip: "{{ backend_api_host }}"

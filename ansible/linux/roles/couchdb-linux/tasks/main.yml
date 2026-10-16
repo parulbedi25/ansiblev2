@@ -1,0 +1,213 @@
+---
+# tasks file for roles/couchdb-linux
+- name: Check if CouchDB service is running
+  command: systemctl is-active couchdb
+  register: couchdb_service_check
+  changed_when: false
+  failed_when: false
+
+- name: Determine if CouchDB is properly installed
+  set_fact:
+    couchdb_installed: "{{ couchdb_service_check.stdout == 'active' }}"
+
+- name: Display CouchDB status
+  debug:
+    msg: "CouchDB service is {{ couchdb_service_check.stdout | default('unknown') }}"
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+  when: not couchdb_installed
+
+- name: Install required packages
+  apt:
+    name:
+      - curl
+      - gnupg
+      - apt-utils
+      - debconf-utils
+    state: present
+  when: not couchdb_installed
+
+- name: Add CouchDB GPG key
+  shell: curl https://couchdb.apache.org/repo/keys.asc | gpg --dearmor | tee /usr/share/keyrings/couchdb-archive-keyring.gpg >/dev/null
+  when: not couchdb_installed
+
+- name: Select CouchDB repo release containing version {{ couchdb_version }}
+  shell: |
+    # Try to find exact version across all candidates
+    for rel in {{ couchdb_repo_candidates | join(' ') }}; do
+      echo "deb [signed-by=/usr/share/keyrings/couchdb-archive-keyring.gpg] https://apache.jfrog.io/artifactory/couchdb-deb/ ${rel} main" > /etc/apt/sources.list.d/couchdb.list
+      apt-get update -qq
+      if apt-cache madison couchdb | awk '{print $3}' | grep -q "^{{ couchdb_version }}"; then
+        echo "${rel}"
+        exit 0
+      fi
+    done
+    # Fallback: use native distro release with any available CouchDB version
+    native_rel="{{ ansible_distribution_release }}"
+    echo "deb [signed-by=/usr/share/keyrings/couchdb-archive-keyring.gpg] https://apache.jfrog.io/artifactory/couchdb-deb/ ${native_rel} main" > /etc/apt/sources.list.d/couchdb.list
+    apt-get update -qq
+    if apt-cache show couchdb >/dev/null 2>&1; then
+      echo "${native_rel}"
+      exit 0
+    fi
+    exit 1
+  register: couchdb_repo_selected
+  changed_when: false
+  when: not couchdb_installed
+
+- name: Fail if CouchDB is not available in any repo candidate
+  fail:
+    msg: >-
+      CouchDB not available in repo candidates:
+      {{ couchdb_repo_candidates | join(', ') }} or native release {{ ansible_distribution_release }}.
+      Check the CouchDB JFrog apt repository.
+  when: not couchdb_installed and couchdb_repo_selected.rc != 0
+
+- name: Set CouchDB repo release
+  set_fact:
+    couchdb_repo_release: "{{ couchdb_repo_selected.stdout }}"
+  when: not couchdb_installed
+
+- name: Get best available CouchDB version from selected repo
+  shell: apt-cache madison couchdb | awk 'NR==1{print $3}'
+  register: couchdb_available_version
+  changed_when: false
+  when: not couchdb_installed
+
+- name: Display selected CouchDB repo and version
+  debug:
+    msg: "CouchDB repo: {{ couchdb_repo_release | default('n/a') }} | Available version: {{ couchdb_available_version.stdout | default('n/a') }}"
+  when: not couchdb_installed
+
+- name: Update apt cache after selecting repository
+  apt:
+    update_cache: yes
+  when: not couchdb_installed
+
+- name: Pre-configure CouchDB mode
+  debconf:
+    name: couchdb
+    question: couchdb/mode
+    value: standalone
+    vtype: select
+  when: not couchdb_installed
+
+- name: Pre-configure CouchDB bind address
+  debconf:
+    name: couchdb
+    question: couchdb/bindaddress
+    value: "{{ couchdb_bind_address }}"
+    vtype: string
+  when: not couchdb_installed
+
+- name: Pre-configure CouchDB admin password
+  debconf:
+    name: couchdb
+    question: couchdb/adminpass
+    value: "{{ couchdb_admin_password }}"
+    vtype: password
+  when: not couchdb_installed
+
+- name: Pre-configure CouchDB cookie
+  debconf:
+    name: couchdb
+    question: couchdb/cookie
+    value: "{{ couchdb_cookie }}"
+    vtype: string
+  when: not couchdb_installed
+
+- name: Pre-configure CouchDB admin password confirmation
+  debconf:
+    name: couchdb
+    question: couchdb/adminpass_again
+    value: "{{ couchdb_admin_password }}"
+    vtype: password
+  when: not couchdb_installed
+
+- name: Install CouchDB
+  apt:
+    name: "couchdb={{ couchdb_available_version.stdout }}"
+    state: present
+    allow_downgrades: yes
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: not couchdb_installed
+  notify: restart couchdb
+
+- name: Configure CouchDB local.ini
+  blockinfile:
+    path: /opt/couchdb/etc/local.ini
+    block: |
+      [admins]
+      {{ couchdb_admin_user }} = {{ couchdb_admin_password }}
+
+      [couchdb]
+      single_node = true
+      max_document_size = 50000000
+
+      [chttpd]
+      bind_address = {{ couchdb_bind_address }}
+      require_valid_user = true
+      max_http_request_size = 4294967296
+      enable_cors = true
+
+      [chttpd_auth]
+      require_valid_user = true
+      authentication_redirect = /_utils/session.html
+
+      [httpd]
+      WWW-Authenticate = Basic realm="couchdb"
+      bind_address = {{ couchdb_bind_address }}
+      enable_cors = true
+
+      [cors]
+      origins = http://localhost:3000,http://localhost
+      credentials = true
+      headers = accept, authorization, content-type, origin, referer
+      methods = GET,PUT,POST,HEAD,DELETE
+      max_age = 3600
+    create: yes
+    mode: '0640'
+  when: not couchdb_installed
+  notify: restart couchdb
+
+- name: Wait for CouchDB port to be available
+  wait_for:
+    port: "{{ couchdb_port }}"
+    timeout: 60
+
+- name: Verify CouchDB installation
+  uri:
+    url: "http://127.0.0.1:{{ couchdb_port }}"
+    user: "{{ couchdb_admin_user }}"
+    password: "{{ couchdb_admin_password }}"
+    force_basic_auth: yes
+    return_content: yes
+  register: couchdb_response
+  failed_when: false
+
+- name: Display CouchDB response
+  debug:
+    msg: "CouchDB response: {{ couchdb_response.content | default('No response') }}"
+
+- name: Check CouchDB service status
+  command: systemctl status couchdb --no-pager
+  register: couchdb_service_status
+  changed_when: false
+  failed_when: false
+
+- name: Display service status
+  debug:
+    msg: "Service status: {{ couchdb_service_status.stdout }}"
+
+- name: Verify CouchDB version
+  command: couchdb -V
+  register: couchdb_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Display CouchDB version
+  debug:
+    msg: "CouchDB version: {{ couchdb_version_check.stdout | default('Version check failed') }}"

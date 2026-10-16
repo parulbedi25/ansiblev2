@@ -1,0 +1,16 @@
+---
+# defaults file for node-service
+service_name: "ATMS-Node-Microservice"
+service_display_name: "ATMS Node.js Microservice"
+service_description: "ATMS Node.js Backend Microservice"
+
+# Node.js application paths
+node_app_dir: "D:\\QASIP\\Apps\\node-service"
+node_executable: "C:\\Program Files\\nodejs\\node.exe"
+node_script_path: "{{ node_app_dir }}\\app.js"
+node_log_dir: "{{ node_app_dir }}\\logs"
+
+# Service configuration
+service_startup: "auto"
+service_restart_delay: 10000  # milliseconds (10 seconds)
+service_restart_attempts: 3

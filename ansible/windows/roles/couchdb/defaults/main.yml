@@ -1,0 +1,10 @@
+---
+# defaults file for roles/couchdb
+couchdb_version: "3.3.3-3"
+couchdb_msi: "apache-couchdb-{{ couchdb_version }}.msi"
+couchdb_url: "https://couchdb.neighbourhood.ie/downloads/{{ couchdb_version }}/win/{{ couchdb_msi }}"
+temp_dir: "D:\\temp"
+couchdb_ini: "D:\\Program Files\\Apache CouchDB\\etc\\local.ini"
+couchdb_port: "5984"
+couchdb_data_dir: "D:\\QASIP\\Data\\couchdb"
+couchdb_view_index_dir: "D:\\QASIP\\Data\\couchdb\\_view_index"

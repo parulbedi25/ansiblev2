@@ -1,0 +1,8 @@
+---
+# handlers file for roles/chocolatey
+- name: Refresh Chocolatey PATH
+  win_path:
+    elements:
+      - "{{ choco_bin_path }}"
+    scope: machine
+    state: present

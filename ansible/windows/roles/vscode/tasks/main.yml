@@ -1,0 +1,52 @@
+---
+# tasks file for roles/vscode
+- name: Check if VS Code is already installed
+  win_stat:
+    path: "{{ vscode_code_exe }}"
+  register: vscode_installed
+
+- name: Skip installation if VS Code already exists
+  debug:
+    msg: "VS Code is already installed at {{ vscode_code_exe }}"
+  when: vscode_installed.stat.exists
+
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+  when: not vscode_installed.stat.exists
+
+- name: Download VS Code installer
+  win_get_url:
+    url: "{{ vscode_url }}"
+    dest: "{{ temp_dir }}\\{{ vscode_exe }}"
+  when: not vscode_installed.stat.exists
+
+- name: Install VS Code silently with required options
+  win_package:
+    path: "{{ temp_dir }}\\{{ vscode_exe }}"
+    arguments: >
+      /VERYSILENT
+      /NORESTART
+      /MERGETASKS=!runcode,
+      addcontextmenufiles,
+      addcontextmenufolders,
+      associatewithfiles,
+      addtopath,
+      desktopicon
+    state: present
+  when: not vscode_installed.stat.exists
+
+- name: Check if VS Code executable exists
+  win_stat:
+    path: "{{ vscode_code_exe }}"
+  register: vscode_stat
+
+- name: Fail if VS Code is not installed
+  fail:
+    msg: >
+      Visual Studio Code is not installed.
+      Expected executable not found at:
+      {{ vscode_code_exe }}
+  when: not vscode_stat.stat.exists
+  

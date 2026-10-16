@@ -1,0 +1,13 @@
+---
+# defaults file for roles/redis-linux
+redis_version: "3.0.0"
+redis_archive: "redis-{{ redis_version }}.tar.gz"
+redis_url: "https://download.redis.io/releases/{{ redis_archive }}"
+redis_src_dir: "/usr/local/src/redis-{{ redis_version }}"
+redis_install_dir: "/usr/local/redis"
+ubuntu_packages:
+  - build-essential
+  - tcl
+  - wget
+  - tar
+  - make

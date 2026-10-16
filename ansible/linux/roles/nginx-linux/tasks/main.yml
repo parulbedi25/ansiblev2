@@ -1,0 +1,233 @@
+---
+# tasks file for roles/nginx-linux
+- name: Check if NGINX is already installed
+  command: nginx -v
+  register: nginx_check
+  changed_when: false
+  failed_when: false
+
+- name: Display NGINX installation status
+  debug:
+    msg: "NGINX is {{ 'already installed' if nginx_check.rc == 0 else 'not installed' }}"
+
+# Nginx 1.8.1 cannot be compiled against OpenSSL 3.0 (Ubuntu 24.04).
+# Install via apt so the system nginx is used and source build is skipped.
+- name: Install NGINX via apt (Ubuntu 24.04 / OpenSSL 3.0 incompatible with nginx 1.8.1 source build)
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+  when: nginx_check.rc != 0
+
+- name: Re-check NGINX after apt install
+  command: nginx -v
+  register: nginx_after_apt
+  changed_when: false
+  failed_when: false
+  when: nginx_check.rc != 0
+
+- name: Update nginx check result after apt install
+  set_fact:
+    nginx_check: "{{ nginx_after_apt }}"
+  when: nginx_after_apt is not skipped
+
+- name: Install required build dependencies
+  apt:
+    name:
+      - build-essential
+      - libpcre3-dev
+      - libssl-dev
+      - zlib1g-dev
+      - wget
+      - curl
+    state: present
+  when: nginx_check.rc != 0
+
+- name: Create /usr/src directory if it doesn't exist
+  file:
+    path: /usr/src
+    state: directory
+    mode: '0755'
+  when: nginx_check.rc != 0
+
+- name: Download NGINX {{ nginx_version }} source
+  get_url:
+    url: "http://nginx.org/download/nginx-{{ nginx_version }}.tar.gz"
+    dest: "/usr/src/nginx-{{ nginx_version }}.tar.gz"
+  when: nginx_check.rc != 0
+
+- name: Extract NGINX source
+  unarchive:
+    src: "/usr/src/nginx-{{ nginx_version }}.tar.gz"
+    dest: /usr/src/
+    remote_src: yes
+  when: nginx_check.rc != 0
+
+- name: Configure NGINX build (disable strict warnings for older versions)
+  command: ./configure --prefix=/usr/local/nginx --with-http_ssl_module --with-http_stub_status_module --with-cc-opt="-Wno-error=implicit-fallthrough -Wno-error=deprecated-declarations"
+  args:
+    chdir: "/usr/src/nginx-{{ nginx_version }}"
+  when: nginx_check.rc != 0
+
+- name: Build NGINX
+  command: make -j{{ ansible_processor_vcpus }}
+  args:
+    chdir: "/usr/src/nginx-{{ nginx_version }}"
+  when: nginx_check.rc != 0
+
+- name: Install NGINX
+  command: make install
+  args:
+    chdir: "/usr/src/nginx-{{ nginx_version }}"
+  when: nginx_check.rc != 0
+
+- name: Create nginx user if it doesn't exist
+  user:
+    name: nginx
+    system: yes
+    shell: /bin/false
+    create_home: no
+  when: nginx_check.rc != 0
+
+- name: Create nginx systemd service file
+  copy:
+    dest: /etc/systemd/system/nginx.service
+    content: |
+      [Unit]
+      Description=The NGINX HTTP and reverse proxy server
+      After=syslog.target network-online.target remote-fs.target nss-lookup.target
+      Wants=network-online.target
+
+      [Service]
+      Type=forking
+      PIDFile=/usr/local/nginx/logs/nginx.pid
+      ExecStartPre=/usr/local/nginx/sbin/nginx -t
+      ExecStart=/usr/local/nginx/sbin/nginx
+      ExecReload=/usr/local/nginx/sbin/nginx -s reload
+      ExecStop=/bin/kill -s QUIT $MAINPID
+      PrivateTmp=true
+
+      [Install]
+      WantedBy=multi-user.target
+  when: nginx_check.rc != 0
+
+- name: Create symlink for nginx command
+  file:
+    src: /usr/local/nginx/sbin/nginx
+    dest: /usr/bin/nginx
+    state: link
+  when: nginx_check.rc != 0
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+  when: nginx_check.rc != 0
+
+- name: Check for source-installed NGINX conf dir
+  stat:
+    path: /usr/local/nginx/conf
+  register: nginx_conf_local
+
+- name: Check for system NGINX conf dir
+  stat:
+    path: /etc/nginx
+  register: nginx_conf_etc
+
+- name: Check common nginx binary locations
+  stat:
+    path: "{{ item }}"
+  loop:
+    - /usr/sbin/nginx
+    - /usr/bin/nginx
+    - /usr/local/nginx/sbin/nginx
+  register: nginx_bin_stats
+
+- name: Set nginx binary path
+  set_fact:
+    nginx_bin: >-
+      {{
+        (nginx_bin_stats.results
+          | selectattr('stat.exists')
+          | map(attribute='item')
+          | list
+          | first) | default('')
+      }}
+
+- name: Use system NGINX paths when installed from package
+  set_fact:
+    nginx_conf_dir: "/etc/nginx"
+    nginx_log_dir: "/var/log/nginx"
+    nginx_pid_file: "/run/nginx.pid"
+    nginx_html_root: "/usr/share/nginx/html"
+    nginx_worker_user: "www-data"
+  when: not nginx_conf_local.stat.exists and nginx_conf_etc.stat.exists
+
+- name: Remove stale custom nginx systemd service file when using system nginx
+  file:
+    path: /etc/systemd/system/nginx.service
+    state: absent
+  when: not nginx_conf_local.stat.exists and nginx_conf_etc.stat.exists
+
+- name: Reload systemd after removing stale nginx service file
+  systemd:
+    daemon_reload: yes
+  when: not nginx_conf_local.stat.exists and nginx_conf_etc.stat.exists
+
+- name: Ensure NGINX conf directory exists
+  file:
+    path: "{{ nginx_conf_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Deploy custom nginx.conf from template
+  template:
+    src: nginx.conf.j2
+    dest: "{{ nginx_conf_dir }}/nginx.conf"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable and restart NGINX to apply configuration
+  systemd:
+    name: nginx
+    enabled: yes
+    state: restarted
+
+- name: Verify NGINX installation
+  command: "{{ nginx_bin }} -v"
+  register: nginx_version_check
+  changed_when: false
+  failed_when: false
+  when: nginx_bin != ''
+
+- name: Fail if NGINX binary is not available
+  fail:
+    msg: >
+      NGINX is not installed or not available.
+      Please check NGINX installation.
+  when: nginx_bin == '' or nginx_version_check.rc != 0
+
+- debug:
+    msg: "NGINX version installed: {{ nginx_version_check.stderr }}"
+
+- name: Check NGINX service status
+  systemd:
+    name: nginx
+  register: nginx_service_status
+
+- debug:
+    msg: "NGINX service status: {{ nginx_service_status.status.ActiveState }}"
+
+- name: Wait for NGINX to start
+  wait_for:
+    port: "{{ nginx_port }}"
+    timeout: 30
+    delay: 5
+
+- name: Verify NGINX is responding locally
+  uri:
+    url: "http://127.0.0.1:{{ nginx_port }}"
+    return_content: no
+    status_code: 200
+  register: nginx_check
+  failed_when: nginx_check.status != 200

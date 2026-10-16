@@ -1,0 +1,16 @@
+---
+# defaults file for python-ai-service-linux
+service_name: "atms-python-ai"
+service_display_name: "ATMS Python AI Application"
+service_description: "ATMS AI Test Script Generator Service"
+
+# Python application paths
+python_app_dir: "/opt/deploy/AI/test_script_generator"
+python_venv_path: "{{ python_app_dir }}/ai_aenv/bin/python"
+python_script_path: "{{ python_app_dir }}/run.py"
+python_log_dir: "{{ python_app_dir }}/logs"
+
+# Service configuration
+service_startup: "auto"
+service_restart_delay: 10  # seconds
+service_restart_attempts: 3

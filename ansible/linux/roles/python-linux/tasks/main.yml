@@ -1,0 +1,114 @@
+---
+# tasks file for roles/python-linux
+- name: Check if Python {{ python_version }} is already installed
+  command: python3.{{ python_version.split('.')[1] }} --version
+  register: python_check
+  changed_when: false
+  failed_when: false
+
+- name: Display Python installation status
+  debug:
+    msg: "Python {{ python_version }} is {{ 'already installed' if python_check.rc == 0 else 'not installed' }}"
+
+- name: Install required build dependencies
+  apt:
+    name:
+      - build-essential
+      - libssl-dev
+      - zlib1g-dev
+      - libbz2-dev
+      - libreadline-dev
+      - libsqlite3-dev
+      - wget
+      - curl
+      - llvm
+      - libncursesw5-dev
+      - xz-utils
+      - tk-dev
+      - libxml2-dev
+      - libxmlsec1-dev
+      - libffi-dev
+      - liblzma-dev
+    state: present
+  when: python_check.rc != 0
+
+- name: Create /usr/src directory if it doesn't exist
+  file:
+    path: /usr/src
+    state: directory
+    mode: '0755'
+  when: python_check.rc != 0
+
+- name: Download Python {{ python_version }} source
+  get_url:
+    url: "https://www.python.org/ftp/python/{{ python_version }}/Python-{{ python_version }}.tgz"
+    dest: "/usr/src/Python-{{ python_version }}.tgz"
+    timeout: 300
+  when: python_check.rc != 0
+
+- name: Extract Python source
+  unarchive:
+    src: "/usr/src/Python-{{ python_version }}.tgz"
+    dest: /usr/src/
+    remote_src: yes
+  when: python_check.rc != 0
+
+- name: Configure Python build
+  command: ./configure --enable-optimizations
+  args:
+    chdir: "/usr/src/Python-{{ python_version }}"
+  when: python_check.rc != 0
+
+- name: Build Python
+  command: make -j{{ ansible_processor_vcpus }}
+  args:
+    chdir: "/usr/src/Python-{{ python_version }}"
+  when: python_check.rc != 0
+
+- name: Install Python {{ python_version }}
+  command: make altinstall
+  args:
+    chdir: "/usr/src/Python-{{ python_version }}"
+  when: python_check.rc != 0
+
+- name: Check if python3.12 exists for alternatives
+  command: which python3.12
+  register: python312_check
+  changed_when: false
+  failed_when: false
+
+- name: Install python3.12 alternative if it exists
+  command: update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 312
+  when: python312_check.rc == 0
+
+- name: Check if python3.11 exists for alternatives
+  command: which python3.11
+  register: python311_check
+  changed_when: false
+  failed_when: false
+
+- name: Install python3.11 alternative
+  command: "update-alternatives --install /usr/bin/python3 python3 {{ python311_check.stdout | trim }} 311"
+  when: python311_check.rc == 0
+
+- name: Set python3.11 as default
+  command: "update-alternatives --set python3 {{ python311_check.stdout | trim }}"
+  when: python311_check.rc == 0
+
+- name: Verify Python 3.11 installation
+  command: python3 --version
+  register: python_version_check
+  changed_when: false
+  failed_when: false
+
+- debug:
+    msg: "Python 3 version: {{ python_version_check.stdout }}"
+
+- name: Verify pip installation
+  command: pip3 --version
+  register: pip_version_check
+  changed_when: false
+  failed_when: false
+
+- debug:
+    msg: "pip version: {{ pip_version_check.stdout }}"

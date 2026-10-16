@@ -1,0 +1,12 @@
+---
+# defaults file for roles/postgres
+pg_version: "10.17-2"
+pg_port: "5432"
+pg_superuser: "postgres"
+pg_superuser_password: "Welcom3!"
+pg_db_name: "atms_master"
+pg_roles:
+  - "admin"
+  - "developer"
+  - "app"
+  - "report"

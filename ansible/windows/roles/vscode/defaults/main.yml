@@ -1,0 +1,7 @@
+---
+# defaults file for roles/vscode
+vscode_exe: "VSCodeSetup-x64.exe"
+vscode_url: "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64"
+temp_dir: "D:\\temp"
+vscode_install_dir: "C:\\Program Files\\Microsoft VS Code"
+vscode_code_exe: "{{ vscode_install_dir }}\\Code.exe"

@@ -1,0 +1,162 @@
+---
+# tasks file for roles/couchdb
+
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+- name: Download CouchDB MSI
+  win_get_url:
+    url: "{{ couchdb_url }}"
+    dest: "{{ temp_dir }}\\{{ couchdb_msi }}"
+
+- name: Install CouchDB (Windows Service)
+  win_package:
+    path: "{{ temp_dir }}\\{{ couchdb_msi }}"
+    arguments: >
+      /quiet
+      INSTALLSERVICE=1
+    state: present
+
+#  Wait for CouchDB service to be registered
+- name: Wait for CouchDB service to be registered
+  win_shell: |
+    $i = 0
+    while ($i -lt 30) {
+      if (Get-Service -Name "Apache CouchDB" -ErrorAction SilentlyContinue) {
+        exit 0
+      }
+      Start-Sleep -Seconds 2
+      $i++
+    }
+    exit 1
+  changed_when: false
+
+- name: Detect CouchDB service executable path
+  win_shell: |
+    $svc = Get-CimInstance Win32_Service -Filter "Name='Apache CouchDB'" -ErrorAction SilentlyContinue
+    if (-not $svc) { exit 1 }
+    $p = $svc.PathName.Trim('"')
+    if (-not $p) { exit 1 }
+    Write-Output $p
+  register: couchdb_service_path
+  changed_when: false
+  failed_when: false
+
+- name: Normalize CouchDB service executable path
+  set_fact:
+    couchdb_service_exe: "{{ (couchdb_service_path.stdout_lines | default([]) | first | default('') | trim) }}"
+
+- name: Set effective CouchDB local.ini path from service location
+  set_fact:
+    couchdb_ini_effective: >-
+      {{
+        (
+          couchdb_service_exe
+          | regex_replace('(?i)\\\\bin\\\\nssm\\.exe$', '\\\\etc\\\\local.ini')
+        )
+        if (couchdb_service_exe | regex_search('(?i)\\\\bin\\\\nssm\\.exe$'))
+        else couchdb_ini
+      }}
+
+- name: Ensure effective CouchDB ini path does not point to nssm.exe
+  assert:
+    that:
+      - not (couchdb_ini_effective | regex_search('(?i)nssm\\.exe$'))
+    fail_msg: "Resolved couchdb_ini_effective is invalid: {{ couchdb_ini_effective }}"
+
+#  Ensure CouchDB config directory exists (do NOT create local.ini explicitly)
+- name: Ensure CouchDB config directory exists
+  win_file:
+    path: "{{ couchdb_ini_effective | win_dirname }}"
+    state: directory
+
+- name: Ensure CouchDB data directories exist
+  win_file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - "{{ couchdb_data_dir }}"
+    - "{{ couchdb_view_index_dir }}"
+
+- name: Ensure [couchdb] section exists
+  win_lineinfile:
+    path: "{{ couchdb_ini_effective }}"
+    line: "[couchdb]"
+    insertafter: EOF
+    create: yes
+
+- name: Set CouchDB database directory
+  win_lineinfile:
+    path: "{{ couchdb_ini_effective }}"
+    regexp: "^database_dir\\s*="
+    line: "database_dir = {{ couchdb_data_dir }}"
+    insertafter: "^\\[couchdb\\]"
+    create: yes
+
+- name: Set CouchDB view index directory
+  win_lineinfile:
+    path: "{{ couchdb_ini_effective }}"
+    regexp: "^view_index_dir\\s*="
+    line: "view_index_dir = {{ couchdb_view_index_dir }}"
+    insertafter: "^\\[couchdb\\]"
+    create: yes
+
+- name: Ensure [admins] section exists
+  win_lineinfile:
+    path: "{{ couchdb_ini_effective }}"
+    line: "[admins]"
+    insertafter: EOF
+    create: yes
+
+- name: Validate CouchDB admin credentials are provided
+  assert:
+    that:
+      - couchdb_admin_user is defined
+      - couchdb_admin_password is defined
+      - (couchdb_admin_user | string | trim | length) > 0
+      - (couchdb_admin_password | string | trim | length) > 0
+    fail_msg: >-
+      couchdb_admin_user/couchdb_admin_password are empty. CouchDB refuses to start
+      without an admin in [admins]. Pass values via vault/secrets or -e vars.
+
+- name: Set CouchDB admin credentials
+  win_lineinfile:
+    path: "{{ couchdb_ini_effective }}"
+    regexp: "^{{ couchdb_admin_user | regex_escape }}\\s*="
+    line: "{{ couchdb_admin_user }} = {{ couchdb_admin_password }}"
+    insertafter: "^\\[admins\\]"
+    create: yes
+  no_log: true
+
+#  Restart AFTER config is written
+- name: Restart CouchDB service
+  win_service:
+    name: "Apache CouchDB"
+    state: restarted
+    start_mode: auto
+
+#  Wait for CouchDB port
+- name: Wait for CouchDB port to be available
+  win_wait_for:
+    host: 127.0.0.1
+    port: "{{ couchdb_port }}"
+    timeout: 120
+
+#  Verify CouchDB
+- name: Verify CouchDB is responding locally
+  win_shell: |
+    try {
+      $response = Invoke-WebRequest -Uri http://127.0.0.1:{{ couchdb_port }} -UseBasicParsing -TimeoutSec 5
+      if ($response.StatusCode -eq 200) {
+        exit 0
+      } else {
+        exit 1
+      }
+    } catch {
+      exit 1
+    }
+  register: couchdb_check
+  changed_when: false
+  failed_when: couchdb_check.rc != 0

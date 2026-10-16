@@ -1,0 +1,9 @@
+---
+# handlers file for roles/eclipse
+- name: Add Eclipse to PATH
+  win_path:
+    elements:
+      - "{{ eclipse_install_dir }}"
+    scope: machine
+    state: present
+

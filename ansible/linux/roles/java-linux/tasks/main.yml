@@ -1,0 +1,100 @@
+---
+# tasks file for roles/java-linux
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Install OpenJDK JDKs for specified versions
+  apt:
+    name: "{{ java_packages[item] }}"
+    state: present
+  loop: "{{ java_versions }}"
+  loop_control:
+    loop_var: item
+
+- name: Set JAVA_HOME environment variable to default version
+  lineinfile:
+    path: /etc/environment
+    regexp: '^JAVA_HOME='
+    line: 'JAVA_HOME={{ java_home }}'
+    create: yes
+
+- name: Add Java 8 bin directory to system PATH
+  shell: |
+    java_path="{{ java_home }}/bin"
+
+    if grep -q "^PATH=" /etc/environment; then
+      sed -i 's|^PATH="\(.*\)"|PATH="'"$java_path"':\1"|g' /etc/environment
+      sed -i 's|^PATH=\(.*\)|PATH='"$java_path"':\1|g' /etc/environment
+    else
+      echo 'PATH="'"$java_path"':$PATH"' >> /etc/environment
+    fi
+  args:
+    executable: /bin/bash
+
+- name: Set Java 8 as default system java using update-alternatives
+  shell: |
+    update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-8-openjdk-amd64/jre/bin/java 9999
+    update-alternatives --set java /usr/lib/jvm/java-8-openjdk-amd64/jre/bin/java
+  become: yes
+
+- name: Set Java 8 as default system javac using update-alternatives
+  shell: |
+    update-alternatives --install /usr/bin/javac javac /usr/lib/jvm/java-8-openjdk-amd64/bin/javac 9999
+    update-alternatives --set javac /usr/lib/jvm/java-8-openjdk-amd64/bin/javac
+  become: yes
+
+- name: Verify Java installations
+  command: "{{ java_home | replace(java_default_version, item) }}/bin/java -version"
+  register: java_version_checks
+  changed_when: false
+  failed_when: false
+  loop: "{{ java_versions }}"
+  loop_control:
+    loop_var: item
+
+- name: Display installed Java versions
+  debug:
+    msg: "Java {{ item }} version: {{ java_version_checks.results[loop_index].stderr_lines | join('\n') }}"
+  loop: "{{ java_versions }}"
+  loop_control:
+    loop_var: item
+    index_var: loop_index
+
+- name: Verify Javac compilers
+  command: "{{ java_home | replace(java_default_version, item) }}/bin/javac -version"
+  register: javac_version_checks
+  changed_when: false
+  failed_when: false
+  loop: "{{ java_versions }}"
+  loop_control:
+    loop_var: item
+
+- name: Display installed Javac versions
+  debug:
+    msg: "Javac {{ item }} version: {{ javac_version_checks.results[loop_index].stderr_lines | join('\n') }}"
+  loop: "{{ java_versions }}"
+  loop_control:
+    loop_var: item
+    index_var: loop_index
+
+- name: Check JAVA_HOME
+  command: echo $JAVA_HOME
+  register: java_home_check
+  changed_when: false
+  failed_when: false
+
+- name: Display JAVA_HOME
+  debug:
+    msg: "JAVA_HOME: {{ java_home_check.stdout }}"
+
+- name: List all available Java alternatives
+  command: update-alternatives --list java
+  register: alternatives_list
+  changed_when: false
+  failed_when: false
+
+- name: Display available Java alternatives
+  debug:
+    msg: "Available Java alternatives: {{ alternatives_list.stdout_lines | join('\n') }}"

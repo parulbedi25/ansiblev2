@@ -1,0 +1,341 @@
+pipeline {
+    agent any
+    parameters {
+        string(
+            name: 'PROJECT_NAME',
+            description: 'Unique project identifier (example: copper, andes, gabilan, api). Used for node naming and labeling.'
+        )
+        choice(
+            name: 'PROJECT_TYPE',
+            choices: ['dev', 'poc', 'project'],
+            description: 'Environment type: dev = development, poc = testing, project = QA/Production'
+        )
+        string(
+            name: 'IP_ADDRESS',
+            defaultValue: '',
+            description: 'Target server IP address for provisioning and agent registration'
+        )
+        string(
+            name: 'USERNAME',
+            defaultValue: '',
+            description: 'Remote login username for target machine'
+        )
+        password(
+            name: 'PASSWORD',
+            defaultValue: '',
+            description: 'Remote login password for target machine'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+    }
+    environment {
+        ANSIBLE_OS = "windows"
+    }
+    
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    // Normalize values safely
+                    env.TARGET_IP       = params.IP_ADDRESS?.trim()?.toLowerCase()
+                    env.TARGET_USER     = params.USERNAME?.trim()?.toLowerCase()
+                    env.TARGET_PASSWORD = params.PASSWORD
+                    env.PROJECT_NAME    = params.PROJECT_NAME?.trim()?.toLowerCase()
+                    env.PROJECT_TYPE    = params.PROJECT_TYPE?.trim()?.toLowerCase()
+                    env.NOTIFY_EMAILS   = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+                    // Required validation
+                    def required = [
+                        'TARGET_IP',
+                        'TARGET_USER',
+                        'TARGET_PASSWORD',
+                        'PROJECT_NAME',
+                        'PROJECT_TYPE',
+                        'NOTIFY_EMAILS'
+                    ]
+                    def missing = required.findAll { !env[it] }
+                    if (missing) {
+                        error """
+BUILD FAILED ❌
+Missing required parameters:
+${missing.join('\n')}
+"""
+                    }
+                    // Validate IP format
+                    if (!(env.TARGET_IP ==~ /^(\d{1,3}\.){3}\d{1,3}$/)) {
+                        error "Invalid IP address format → ${env.TARGET_IP}"
+                    }
+                    echo "Parameter validation successful ✅"
+
+                    // -----------------------------
+                    // Validate Email List
+                    // -----------------------------
+                    def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+
+                    def emailList = env.NOTIFY_EMAILS
+                                        .split(',')
+                                        .collect { it.trim() }
+                                        .findAll { it }
+
+                    // Duplicate check
+                    def duplicates = emailList.groupBy { it }
+                                            .findAll { it.value.size() > 1 }
+                                            .keySet()
+
+                    if (duplicates) {
+                        error "Duplicate email(s) found: ${duplicates.join(', ')}"
+                    }
+
+                    // Format check
+                    def invalidEmails = emailList.findAll { !(it ==~ emailRegex) }
+
+                    if (invalidEmails) {
+                        error """
+        Invalid email format detected:
+        ${invalidEmails.join('\n')}
+
+        Expected format:
+        user1@qasource.com, user2@qasource.com
+        """
+                    }
+
+                    // Save clean list back to env (optional but recommended)
+                    env.NOTIFY_EMAILS = emailList.join(',')
+
+                    echo "Parameter validation successful ✅"
+                }
+            }
+        }
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout SCM') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Validate Dependencies') {
+            steps {
+                script {
+                    echo "Checking Git installation..."
+                    if (sh(script: 'git --version', returnStatus: true) != 0)
+                        error("Git is not installed on agent")
+                    echo "Checking Python installation..."
+                    if (sh(script: 'python --version || python3 --version', returnStatus: true) != 0)
+                        error("Python is not installed on agent")
+                    echo "Checking j2cli installation..."
+                    if (sh(script: 'j2 --version', returnStatus: true) != 0) {
+                        echo "j2cli not found — installing"
+                        sh 'pipx install j2cli'
+                    }
+                    echo "Dependency validation completed successfully"
+                }
+            }
+        }
+        stage('Provision Server via Ansible') {
+            steps {
+        withCredentials([
+            usernamePassword(
+                credentialsId: 'java-db-credentials',
+                usernameVariable: 'POSTGRES_USER',
+                passwordVariable: 'POSTGRES_PASSWORD'
+            ),
+            usernamePassword(
+                credentialsId: 'python-db-credentials',
+                usernameVariable: 'COUCH_USER',
+                passwordVariable: 'COUCH_PASS'
+            )
+        ]) {
+            script {
+                def inventoryTemplate = "ansible/${ANSIBLE_OS}/inventory/inventory.ini.j2"
+                def inventoryFile     = "ansible/${ANSIBLE_OS}/inventory/inventory.ini"
+                def playbookFile      = "ansible/${ANSIBLE_OS}/${ANSIBLE_OS}.yml"
+                if (!fileExists(inventoryTemplate))
+                    error("Inventory template not found: ${inventoryTemplate}")
+                sh """
+cat <<EOF | j2 --format=json '${inventoryTemplate}' - > '${inventoryFile}'
+{
+  "ANSIBLE_IP_ADDRESS": "${TARGET_IP}",
+  "ANSIBLE_USER": "${TARGET_USER}",
+  "ANSIBLE_PASSWORD": "${TARGET_PASSWORD}"
+}
+EOF
+cat '${inventoryFile}'
+"""
+                if (!fileExists(inventoryFile))
+                    error("Inventory file creation failed")
+                echo "Running Ansible playbook: ${playbookFile}"
+                sh """
+VARS_FILE=\$(mktemp /tmp/db_creds_XXXXXX.json)
+python3 -c "
+import json, sys
+print(json.dumps({
+    'pg_superuser': sys.argv[1],
+    'pg_superuser_password': sys.argv[2],
+    'couchdb_admin_user': sys.argv[3],
+    'couchdb_admin_password': sys.argv[4]
+}))
+" "\$POSTGRES_USER" "\$POSTGRES_PASSWORD" "\$COUCH_USER" "\$COUCH_PASS" > "\$VARS_FILE"
+ansible-playbook ${playbookFile} -i ${inventoryFile} \
+-e "java_versions=['8','17']" \
+-e "java_default_version=17" \
+-e "backend_api_host=${TARGET_IP}" \
+-e "project_name=${PROJECT_NAME}" \
+-e "@\$VARS_FILE"  \
+-vvv
+rm -f "\$VARS_FILE"
+"""
+            }
+        }
+    }
+}
+        stage('Register Jenkins Agent') {
+            steps {
+                script {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'jenkins-api-creds',
+                            usernameVariable: 'JENKINS_USER',
+                            passwordVariable: 'JENKINS_TOKEN'
+                        )
+                    ]) {
+                        sh """
+chmod +x add_node.sh
+./add_node.sh \
+jenkins_host="\$JENKINS_URL" \
+jenkins_user="\$JENKINS_USER" \
+jenkins_token="\$JENKINS_TOKEN" \
+node_name="${PROJECT_NAME}-${PROJECT_TYPE}-${TARGET_IP}" \
+remote_host="${TARGET_IP}" \
+remote_user="${TARGET_USER}" \
+remote_pass="\$TARGET_PASSWORD" \
+remote_fs="C:/Jenkins" \
+executors=2 \
+java_path="C:/Java/jdk17/bin/java.exe" \
+label="${PROJECT_NAME}-${PROJECT_TYPE}"
+"""
+                    }
+                }
+            }
+        }
+        stage('Install Node Dependencies') {
+            steps {
+                sh 'cd scripts && npm install'
+            }
+        }
+    }
+    
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+
+                    def node_name = "${params.PROJECT_NAME}-${params.PROJECT_TYPE}-${params.IP_ADDRESS}"
+                    def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+                    echo """
+    ========================================
+    PIPELINE PASSED
+    ========================================
+    Project Name  : ${params.PROJECT_NAME}
+    Project Type  : ${params.PROJECT_TYPE}
+    IP Address    : ${params.IP_ADDRESS}
+    Agent Name    : ${node_name}
+    Execution Time: ${executionTime}
+    Build URL     : ${env.BUILD_URL}
+    ========================================
+    """
+
+                    sh """
+                    node scripts/sendProvisioningEmail.js \
+                    --smtpServer=$SMTP_SERVER \
+                    --smtpUser=$SMTP_USER \
+                    --smtpPassword=$SMTP_PASSWORD \
+                    --smtpPort=$SMTP_PORT \
+                    --senderName="DevOps QASIP" \
+                    --senderEmail="copper@qasource.com" \
+                    --receiverEmail="${params.NOTIFICATION_EMAILS}" \
+                    --projectName="${params.PROJECT_NAME}" \
+                    --projectType="${params.PROJECT_TYPE}" \
+                    --ipAddress="${params.IP_ADDRESS}" \
+                    --osType="${env.ANSIBLE_OS}" \
+                    --agentName="${node_name}" \
+                    --executionTime="${executionTime}" \
+                    --status="success"
+                    """
+                }
+            }
+        }
+            // script {
+            //     def node_name = "${params.PROJECT_NAME}-${params.PROJECT_TYPE}-${params.IP_ADDRESS}"
+            //     def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+            //     sh """
+            //     node scripts/sendProvisioningEmail.js \
+            //     --smtpServer=$SMTP_SERVER \
+            //     --smtpUser=$SMTP_USER \
+            //     --smtpPassword=$SMTP_PASSWORD \
+            //     --smtpPort=$SMTP_PORT \
+            //     --senderName="DevOps QASIP" \
+            //     --senderEmail="copper@qasource.com" \
+            //     --receiverEmail="usguleria@qasource.com" \
+            //     --projectName="${params.PROJECT_NAME}" \
+            //     --projectType="${params.PROJECT_TYPE}" \
+            //     --ipAddress="${params.IP_ADDRESS}" \
+            //     --osType="${env.ANSIBLE_OS}" \
+            //     --agentName="${node_name}" \
+            //     --executionTime="${executionTime}" \
+            //     --status="success" \
+            //     --runUrl="${env.BUILD_URL}"
+            //     """
+            // }
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    echo """
+    ========================================
+    ❌ PIPELINE FAILED
+    ========================================
+    ========================================
+    """
+                    // def node_name = "${params.PROJECT_NAME}-${params.PROJECT_TYPE}-${params.IP_ADDRESS}"
+                    // def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+                    // sh """
+                    // node scripts/sendProvisioningEmail.js \
+                    // --smtpServer=$SMTP_SERVER \
+                    // --smtpUser=$SMTP_USER \
+                    // --smtpPassword=$SMTP_PASSWORD \
+                    // --smtpPort=$SMTP_PORT \
+                    // --senderName="DevOps QASIP" \
+                    // --senderEmail="copper@qasource.com" \
+                    // --receiverEmail="usguleria@qasource.com" \
+                    // --projectName="${params.PROJECT_NAME}" \
+                    // --projectType="${params.PROJECT_TYPE}" \
+                    // --ipAddress="${params.IP_ADDRESS}" \
+                    // --osType="${env.ANSIBLE_OS}" \
+                    // --agentName="${node_name}" \
+                    // --executionTime="${executionTime}" \
+                    // --status="failure" \
+                    // --runUrl="${env.BUILD_URL}"
+                    // """
+                }
+            }
+        }
+    }
+}

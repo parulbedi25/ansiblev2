@@ -1,0 +1,9 @@
+{
+  "name": "jenkins-email-sender",
+  "version": "1.0.0",
+  "dependencies": {
+    "nodemailer": "^6.9.13",
+    "minimist": "^1.2.8",
+    "yargs": "^17.7.2"
+  }
+}

@@ -1,0 +1,8 @@
+---
+# handlers file for roles/redis
+- name: Add Redis tools directory to system PATH
+  win_path:
+    elements:
+      - "{{ redis_tools_path }}"
+    scope: machine
+    state: present

@@ -1,0 +1,154 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: 'copper-dev-10.10.12.78',
+            description: 'Jenkins agent label'
+        )
+    }
+
+   environment {
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+        MODULE_PATH          = 'C:\\qasip'
+        ARTIFACT_NAME        = 'modules.tar.gz'
+        ARTIFACT_PATH        = "${MODULE_PATH}\\${ARTIFACT_NAME}"
+        NEXUS_UPLOAD_PATH    = "common/${ARTIFACT_NAME}"
+    }
+
+  stages {
+
+        // =====================================================
+        // Validate Artifact
+        // =====================================================
+
+        stage('Validate Artifact') {
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Validating Artifact
+                    echo ========================================
+
+                    echo Artifact Path:
+                    echo ${ARTIFACT_PATH}
+
+                    if not exist "${ARTIFACT_PATH}" (
+                        echo.
+                        echo ERROR: Artifact file not found
+                        echo.
+
+                        dir "${MODULE_PATH}"
+
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Artifact found successfully.
+                """
+            }
+        }
+
+        // =====================================================
+        // Upload Artifact
+        // =====================================================
+
+        stage('Upload Artifact') {
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${NEXUS_CREDENTIALS_ID}",
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        @echo off
+
+                        echo ========================================
+                        echo Uploading Artifact to Nexus
+                        echo ========================================
+
+                        echo Upload URL:
+                        echo ${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}
+
+                        curl.exe -s -o nul -w "%%{http_code}" ^
+                        -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                        --upload-file "${ARTIFACT_PATH}" ^
+                        "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}" > response.txt
+
+                        set /p HTTP_CODE=<response.txt
+
+                        del response.txt
+
+                        echo.
+                        echo HTTP Response: %HTTP_CODE%
+
+                        if "%HTTP_CODE%"=="201" (
+
+                            echo.
+                            echo Upload Successful
+
+                            exit /b 0
+
+                        ) else (
+
+                            echo.
+                            echo Upload Failed
+
+                            exit /b 1
+                        )
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+
+        success {
+
+            echo """
+            ========================================
+            UPLOAD SUCCESSFUL
+            ========================================
+
+            Artifact:
+            ${ARTIFACT_PATH}
+
+            Nexus URL:
+            ${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}
+
+            ========================================
+            """
+        }
+
+        failure {
+
+            echo """
+            ========================================
+            UPLOAD FAILED
+            ========================================
+            """
+        }
+    }
+}

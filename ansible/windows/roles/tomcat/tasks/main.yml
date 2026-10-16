@@ -1,0 +1,169 @@
+---
+# tasks file for tomcat
+
+- name: Ensure temp directory exists
+  ansible.windows.win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+- name: Ensure Tomcat apps directory exists
+  ansible.windows.win_file:
+    path: "{{ tomcat_install_dir | win_dirname }}"
+    state: directory
+
+# ========================================
+# Install Visual C++ Redistributables
+# ========================================
+
+- name: Check if Visual C++ 2015-2022 Redistributable x64 is installed
+  ansible.windows.win_reg_stat:
+    path: 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
+    name: Version
+  register: vcredist_x64_check
+
+- name: Download Visual C++ Redistributable x64
+  ansible.windows.win_get_url:
+    url: "{{ vcredist_x64_url }}"
+    dest: "{{ temp_dir }}\\VC_redist.x64.exe"
+  when: not vcredist_x64_check.exists
+
+- name: Install Visual C++ Redistributable x64
+  ansible.windows.win_package:
+    path: "{{ temp_dir }}\\VC_redist.x64.exe"
+    arguments: /install /quiet /norestart
+    product_id: '{}'
+    state: present
+  when: not vcredist_x64_check.exists
+  register: vcredist_x64_install
+
+- name: Check if Visual C++ 2015-2022 Redistributable x86 is installed
+  ansible.windows.win_reg_stat:
+    path: 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\x86'
+    name: Version
+  register: vcredist_x86_check
+
+- name: Download Visual C++ Redistributable x86
+  ansible.windows.win_get_url:
+    url: "{{ vcredist_x86_url }}"
+    dest: "{{ temp_dir }}\\VC_redist.x86.exe"
+  when: not vcredist_x86_check.exists
+
+- name: Install Visual C++ Redistributable x86
+  ansible.windows.win_package:
+    path: "{{ temp_dir }}\\VC_redist.x86.exe"
+    arguments: /install /quiet /norestart
+    product_id: '{}'
+    state: present
+  when: not vcredist_x86_check.exists
+  register: vcredist_x86_install
+
+- name: Wait for VC++ installation to complete
+  ansible.windows.win_shell: Start-Sleep -Seconds 10
+  when: (vcredist_x64_install.changed | default(false)) or
+        (vcredist_x86_install.changed | default(false))
+
+# ========================================
+# Install Apache Tomcat 9.0
+# ========================================
+
+- name: Check if Tomcat is already installed
+  win_stat:
+    path: "{{ tomcat_install_dir }}\\bin\\catalina.bat"
+  register: tomcat_check
+
+- name: Check if Tomcat service exists
+  win_service:
+    name: "{{ tomcat_service_name }}"
+  register: tomcat_service_check
+  failed_when: false
+
+- name: Download Apache Tomcat {{ tomcat_version }} ZIP
+  win_get_url:
+    url: "{{ tomcat_url }}"
+    dest: "{{ temp_dir }}\\{{ tomcat_zip }}"
+  when: not tomcat_check.stat.exists
+
+- name: Extract Tomcat ZIP to temp directory
+  win_unzip:
+    src: "{{ temp_dir }}\\{{ tomcat_zip }}"
+    dest: "{{ temp_dir }}"
+    creates: "{{ temp_dir }}\\apache-tomcat-{{ tomcat_version }}"
+  when: not tomcat_check.stat.exists
+
+- name: Move extracted Tomcat to installation directory
+  win_shell: |
+    Move-Item -Path "{{ temp_dir }}\apache-tomcat-{{ tomcat_version }}" -Destination "{{ tomcat_install_dir }}" -Force
+  args:
+    chdir: "{{ temp_dir }}"
+  when: not tomcat_check.stat.exists
+
+# ========================================
+# Ensure NSSM and create service
+# ========================================
+
+- name: Check if NSSM is available
+  ansible.windows.win_command: nssm version
+  register: nssm_check
+  changed_when: false
+  failed_when: nssm_check.rc != 0
+
+# Here we use NSSM to run java.exe with Tomcat bootstrap, not catalina.bat
+# Adjust classpath if your layout differs.
+- name: Install Tomcat service using NSSM
+  ansible.windows.win_command: >
+    nssm install {{ tomcat_service_name }}
+    "{{ java_exe }}"
+    -Dcatalina.base={{ tomcat_install_dir }}
+    -Dcatalina.home={{ tomcat_install_dir }}
+    -Djava.io.tmpdir={{ tomcat_install_dir }}\temp
+    -classpath {{ tomcat_install_dir }}\bin\bootstrap.jar;{{ tomcat_install_dir }}\bin\tomcat-juli.jar
+    org.apache.catalina.startup.Bootstrap
+    start
+  args:
+    chdir: "{{ tomcat_install_dir }}\\bin"
+  when: not tomcat_service_check.exists
+
+- name: Configure Tomcat service working directory
+  ansible.windows.win_command: >
+    nssm set {{ tomcat_service_name }} AppDirectory "{{ tomcat_install_dir }}"
+  when: not tomcat_service_check.exists
+
+- name: Verify service was created
+  ansible.windows.win_command: nssm status {{ tomcat_service_name }}
+  register: service_status
+  when: not tomcat_service_check.exists
+  failed_when: service_status.rc not in [0,3]  # 0=running, 3=stopped
+
+- name: Verify Tomcat installation
+  ansible.windows.win_stat:
+    path: "{{ tomcat_install_dir }}\\bin\\catalina.bat"
+  register: tomcat_verify
+  failed_when: not tomcat_verify.stat.exists
+
+# ========================================
+# Manage service with win_service
+# ========================================
+
+- name: Configure Tomcat service startup type
+  ansible.windows.win_service:
+    name: "{{ tomcat_service_name }}"
+    start_mode: "{{ tomcat_service_startup }}"
+    state: started
+
+- name: Add Tomcat bin directory to system PATH
+  ansible.windows.win_path:
+    elements:
+      - "{{ tomcat_install_dir }}\\bin"
+    scope: machine
+    state: present
+
+- name: Display Tomcat installation status
+  ansible.builtin.debug:
+    msg: |
+      Apache Tomcat {{ tomcat_version }} installation completed
+      Installation Directory: {{ tomcat_install_dir }}
+      Service Name: {{ tomcat_service_name }}
+      Service Status: Running
+      HTTP Port: {{ tomcat_http_port }}
+      Access URL: http://localhost:{{ tomcat_http_port }}
+      Management: Use 'net stop/start {{ tomcat_service_name }}' to control service

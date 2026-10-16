@@ -1,0 +1,20 @@
+---
+# handlers file for python-ai-service-linux
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart python-ai-service
+  systemd:
+    name: "{{ service_name }}"
+    state: restarted
+
+- name: stop python-ai-service
+  systemd:
+    name: "{{ service_name }}"
+    state: stopped
+
+- name: start python-ai-service
+  systemd:
+    name: "{{ service_name }}"
+    state: started

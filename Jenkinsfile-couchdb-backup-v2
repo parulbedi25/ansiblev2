@@ -1,0 +1,1379 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: 'test-agent',
+            description: 'Target Jenkins Agent'
+        )
+
+        string(
+            name: 'COUCHDB_HOST',
+            defaultValue: '10.10.7.102',
+            description: 'IP address of the target machine running CouchDB API'
+        )
+
+
+
+        string(
+            name: 'COUCH_USER',
+            defaultValue: 'admin',
+            description: 'CouchDB Username'
+        )
+
+        password(
+            name: 'COUCH_PASSWORD',
+            defaultValue: '',
+            description: 'CouchDB Password'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Notification Email(s)'
+        )
+
+        choice(
+            name: 'DOCUMENT_TYPE',
+            choices: [
+                'ALL',
+                'FRAMEWORK',
+                'PLATFORM',
+                'PLATFORM_XPATH',
+                'POM PAGES',
+                'XPATH'
+            ],
+            description: 'Document type to backup'
+        )
+    }
+
+    environment {
+
+        // ============================================================
+        // CouchDB Configuration
+        // ============================================================
+
+        ROOT_BACKUP = 'D:\\QASIP\\Backup'
+
+        /*
+         * CouchDB is running locally on the Jenkins target machine.
+         *
+         * If CouchDB is running on another machine, change this to:
+         *
+         * COUCH_HOST = "${params.COUCHDB_HOST}"
+         *
+         */
+
+        COUCH_HOST = 'localhost'
+        COUCH_PORT = '5984'
+
+
+        // ============================================================
+        // Nexus Configuration
+        // ============================================================
+
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        NEXUS_BACKUP_ROOT = 'couchdb-backup'
+
+        BACKUP_VERSION = '1.0.0'
+    }
+
+
+    stages {
+
+
+        // ============================================================
+        // 1. Validate Parameters
+        // ============================================================
+
+        stage('Validate Parameters') {
+
+            steps {
+
+                script {
+
+                    echo '=========================================='
+                    echo 'Validating Parameters'
+                    echo '=========================================='
+
+                    echo "PROJECT_TARGET_MACHINE : ${params.PROJECT_TARGET_MACHINE}"
+                    echo "COUCHDB_HOST           : ${params.COUCHDB_HOST}"
+                    echo "COUCH_DATABASE         : ${params.COUCH_DATABASE}"
+                    echo "COUCH_USER             : ${params.COUCH_USER}"
+                    echo "DOCUMENT_TYPE          : ${params.DOCUMENT_TYPE}"
+
+                    def passwordProvided =
+                        params.COUCH_PASSWORD != null &&
+                        params.COUCH_PASSWORD.toString().trim()
+
+                    echo "COUCH_PASSWORD         : ${passwordProvided ? 'PROVIDED' : 'EMPTY'}"
+
+                    echo '=========================================='
+
+                    if (!params.PROJECT_TARGET_MACHINE?.trim()) {
+                        error 'PROJECT_TARGET_MACHINE is required.'
+                    }
+
+                    if (!params.COUCHDB_HOST?.trim()) {
+                        error 'COUCHDB_HOST is required.'
+                    }
+
+                    if (!params.COUCH_DATABASE?.toString()?.trim()) {
+                        error 'COUCH_DATABASE is required.'
+                    }
+
+                    if (!params.COUCH_USER?.trim()) {
+                        error 'COUCH_USER is required.'
+                    }
+
+                    if (!passwordProvided) {
+                        error 'COUCH_PASSWORD is required.'
+                    }
+
+                    if (!params.DOCUMENT_TYPE?.trim()) {
+                        error 'DOCUMENT_TYPE is required.'
+                    }
+
+
+                    // ====================================================
+                    // Store validated values in environment
+                    // ====================================================
+
+                    env.COUCH_DATABASE =
+                        params.COUCH_DATABASE.toString().trim()
+
+                    env.COUCH_USER =
+                        params.COUCH_USER.trim()
+
+                    env.COUCH_PASSWORD =
+                        params.COUCH_PASSWORD.toString()
+
+                    env.DOCUMENT_TYPE =
+                        params.DOCUMENT_TYPE.trim()
+
+
+                    echo ''
+                    echo 'Parameter validation successful.'
+                    echo ''
+                }
+            }
+        }
+
+
+        // ============================================================
+        // 2. Verify CouchDB Connection
+        // ============================================================
+
+        stage('Verify CouchDB Connection') {
+
+            steps {
+
+                powershell '''
+
+                $ErrorActionPreference = "Stop"
+
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "Checking CouchDB"
+                Write-Host "=========================================="
+
+                $dbUrl =
+                    "http://${env:COUCH_HOST}:${env:COUCH_PORT}/"
+
+                $pair =
+                    "${env:COUCH_USER}:$env:COUCH_PASSWORD"
+
+                $encodedCreds =
+                    [Convert]::ToBase64String(
+                        [Text.Encoding]::ASCII.GetBytes($pair)
+                    )
+
+                $headers = @{
+                    Authorization = "Basic $encodedCreds"
+                }
+
+                try {
+
+                    $response =
+                        Invoke-RestMethod `
+                            -Uri $dbUrl `
+                            -Headers $headers `
+                            -Method Get
+
+                    Write-Host "CouchDB connection successful."
+                }
+
+                catch {
+
+                    throw `
+                        "Unable to connect to CouchDB at $dbUrl. Error: $($_.Exception.Message)"
+                }
+
+                Write-Host ""
+
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // 3. Verify Selected Database
+        // ============================================================
+
+        stage('Verify Selected Database') {
+
+            steps {
+
+                powershell '''
+
+                $ErrorActionPreference = "Stop"
+
+
+                # ====================================================
+                # Get selected databases
+                # ====================================================
+
+                $DatabaseList =
+                    "${env:COUCH_DATABASE}" -split ',' |
+                    ForEach-Object {
+                        $_.Trim()
+                    } |
+                    Where-Object {
+                        $_ -ne ""
+                    }
+
+
+                if ($DatabaseList.Count -eq 0) {
+
+                    throw "No CouchDB database selected."
+                }
+
+
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "Verifying Selected Databases"
+                Write-Host "=========================================="
+                Write-Host "Databases selected: $($DatabaseList.Count)"
+                Write-Host ""
+
+
+                # ====================================================
+                # Authentication
+                # ====================================================
+
+                $pair =
+                    "${env:COUCH_USER}:$env:COUCH_PASSWORD"
+
+                $encodedCreds =
+                    [Convert]::ToBase64String(
+                        [Text.Encoding]::ASCII.GetBytes($pair)
+                    )
+
+                $headers = @{
+                    Authorization = "Basic $encodedCreds"
+                }
+
+
+                # ====================================================
+                # Verify every selected database
+                # ====================================================
+
+                foreach ($Database in $DatabaseList) {
+
+                    Write-Host "Checking database: $Database"
+
+                    $dbUrl =
+                        "http://${env:COUCH_HOST}:${env:COUCH_PORT}/$Database"
+
+                    try {
+
+                        $dbInfo =
+                            Invoke-RestMethod `
+                                -Uri $dbUrl `
+                                -Headers $headers `
+                                -Method Get
+
+                        Write-Host "  Database exists."
+                        Write-Host "  Documents: $($dbInfo.doc_count)"
+                        Write-Host ""
+
+                    }
+
+                    catch {
+
+                        throw `
+                            "Database '$Database' does not exist or cannot be accessed."
+                    }
+                }
+
+
+                Write-Host "=========================================="
+                Write-Host "All selected databases verified."
+                Write-Host "=========================================="
+                Write-Host ""
+
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // 4. Create Backup Folder
+        // ============================================================
+
+        stage('Create Backup Folder') {
+
+            steps {
+
+                script {
+
+                    def now = new Date()
+
+                    def dateFolder =
+                        now.format('yyyy-MM-dd')
+
+                    def timeFolder =
+                        now.format('HH-mm-ss')
+
+                    def timestamp =
+                        "${dateFolder}-${timeFolder}-build${env.BUILD_NUMBER}"
+
+
+                    env.BACKUP_TIMESTAMP = timestamp
+                    env.BACKUP_DATE = dateFolder
+                    env.BACKUP_TIME = timeFolder
+
+
+                    env.BACKUP_FOLDER =
+                        "${env.ROOT_BACKUP}\\${timestamp}"
+
+
+                    env.TYPE_BACKUP_FOLDER =
+                        "${env.BACKUP_FOLDER}\\couchdb\\${params.DOCUMENT_TYPE}"
+
+
+                    echo ''
+                    echo '=========================================='
+                    echo 'Creating Backup Folder'
+                    echo '=========================================='
+                    echo "Backup Folder : ${env.BACKUP_FOLDER}"
+                    echo "Type Folder   : ${env.TYPE_BACKUP_FOLDER}"
+                    echo "Date          : ${env.BACKUP_DATE}"
+                    echo "Time          : ${env.BACKUP_TIME}"
+                    echo '=========================================='
+                    echo ''
+
+
+                    powershell """
+
+                    \$ErrorActionPreference = "Stop"
+
+                    \$BackupFolder =
+                        "${env.BACKUP_FOLDER}"
+
+                    \$TypeBackupFolder =
+                        "${env.TYPE_BACKUP_FOLDER}"
+
+
+                    New-Item `
+                        -ItemType Directory `
+                        -Force `
+                        -Path \$TypeBackupFolder |
+                        Out-Null
+
+
+                    Write-Host "Backup folder created successfully:"
+                    Write-Host \$TypeBackupFolder
+
+                    """
+                }
+            }
+        }
+
+
+        // ============================================================
+        // 5. Backup Documents Based On Selected Type
+        // ============================================================
+
+        stage('Backup Documents By Type') {
+
+            steps {
+
+                powershell '''
+
+                $ErrorActionPreference = "Stop"
+
+
+                # ====================================================
+                # Get selected databases
+                # ====================================================
+
+                $DatabaseList =
+                    "${env:COUCH_DATABASE}" -split ',' |
+                    ForEach-Object {
+                        $_.Trim()
+                    } |
+                    Where-Object {
+                        $_ -ne ""
+                    }
+
+
+                $DocumentType =
+                    "${env:DOCUMENT_TYPE}"
+
+
+                # ====================================================
+                # Root CouchDB backup folder
+                # ====================================================
+
+                $CouchDBBackupRoot =
+                    Join-Path `
+                        "${env:BACKUP_FOLDER}" `
+                        "couchdb"
+
+
+                New-Item `
+                    -ItemType Directory `
+                    -Force `
+                    -Path $CouchDBBackupRoot |
+                    Out-Null
+
+
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "CouchDB Document Backup"
+                Write-Host "=========================================="
+                Write-Host "Databases     : $($DatabaseList.Count)"
+                Write-Host "Document Type : $DocumentType"
+                Write-Host "Backup Root   : $CouchDBBackupRoot"
+                Write-Host "=========================================="
+                Write-Host ""
+
+
+                # ====================================================
+                # Authentication
+                # ====================================================
+
+                $pair =
+                    "${env:COUCH_USER}:$env:COUCH_PASSWORD"
+
+                $encodedCreds =
+                    [Convert]::ToBase64String(
+                        [Text.Encoding]::ASCII.GetBytes($pair)
+                    )
+
+                $headers = @{
+                    Authorization = "Basic $encodedCreds"
+                    "Content-Type" = "application/json"
+                }
+
+
+                # ====================================================
+                # Global counters
+                # ====================================================
+
+                $TotalSaved = 0
+                $TotalSkipped = 0
+
+
+                # ====================================================
+                # Process each database
+                # ====================================================
+
+                foreach ($Database in $DatabaseList) {
+
+                    Write-Host ""
+                    Write-Host "##########################################"
+                    Write-Host "Processing Database: $Database"
+                    Write-Host "##########################################"
+                    Write-Host ""
+
+
+                    # =================================================
+                    # Create database folder
+                    # =================================================
+
+                    $DatabaseBackupFolder =
+                        Join-Path `
+                            $CouchDBBackupRoot `
+                            $Database
+
+
+                    New-Item `
+                        -ItemType Directory `
+                        -Force `
+                        -Path $DatabaseBackupFolder |
+                        Out-Null
+
+
+                    Write-Host "Database backup folder:"
+                    Write-Host "$DatabaseBackupFolder"
+                    Write-Host ""
+
+
+                    # =================================================
+                    # Create Mango Query
+                    # =================================================
+
+                    if ($DocumentType -eq "ALL") {
+
+                        Write-Host "Backup mode: ALL"
+
+                        $Query = @{
+                            selector = @{}
+                            limit = 100000
+                        }
+
+                    }
+
+                    else {
+
+                        Write-Host "Backup mode: $DocumentType"
+
+                        $Query = @{
+                            selector = @{
+                                type = $DocumentType
+                            }
+
+                            limit = 100000
+                        }
+                    }
+
+
+                    $QueryJson =
+                        $Query | ConvertTo-Json -Depth 20
+
+
+                    # =================================================
+                    # CouchDB _find
+                    # =================================================
+
+                    $FindUrl =
+                        "http://${env:COUCH_HOST}:${env:COUCH_PORT}/$Database/_find"
+
+
+                    Write-Host "Query URL:"
+                    Write-Host "$FindUrl"
+                    Write-Host ""
+
+
+                    try {
+
+                        $Response =
+                            Invoke-RestMethod `
+                                -Uri $FindUrl `
+                                -Headers $headers `
+                                -Method Post `
+                                -Body $QueryJson
+
+                    }
+
+                    catch {
+
+                        throw `
+                            "CouchDB _find failed for database '$Database': $($_.Exception.Message)"
+                    }
+
+
+                    # =================================================
+                    # Documents
+                    # =================================================
+
+                    $Documents =
+                        @($Response.docs)
+
+
+                    Write-Host "Documents found: $($Documents.Count)"
+                    Write-Host ""
+
+
+                    if ($Documents.Count -eq 0) {
+
+                        Write-Warning `
+                            "No documents found in database '$Database' for type '$DocumentType'."
+
+                        continue
+                    }
+
+
+                    # =================================================
+                    # Database counters
+                    # =================================================
+
+                    $DatabaseSavedCount = 0
+                    $DatabaseSkippedCount = 0
+
+                    $TypeCounts = @{}
+
+
+                    # =================================================
+                    # Process documents
+                    # =================================================
+
+                    foreach ($Document in $Documents) {
+
+
+                        # =============================================
+                        # Validate _id
+                        # =============================================
+
+                        if (
+                            $null -eq $Document._id -or
+                            [string]::IsNullOrWhiteSpace(
+                                [string]$Document._id
+                            )
+                        ) {
+
+                            Write-Warning `
+                                "Document without _id found in '$Database'. Skipping."
+
+                            $DatabaseSkippedCount++
+                            $TotalSkipped++
+
+                            continue
+                        }
+
+
+                        # =============================================
+                        # Determine document type
+                        # =============================================
+
+                        if ($DocumentType -eq "ALL") {
+
+                            if (
+                                $null -eq $Document.type -or
+                                [string]::IsNullOrWhiteSpace(
+                                    [string]$Document.type
+                                )
+                            ) {
+
+                                $CurrentType = "NO_TYPE"
+
+                            }
+
+                            else {
+
+                                $CurrentType =
+                                    [string]$Document.type
+                            }
+
+                        }
+
+                        else {
+
+                            $CurrentType =
+                                $DocumentType
+                        }
+
+
+                        # =============================================
+                        # Make folder name Windows-safe
+                        # =============================================
+
+                        $SafeType =
+                            $CurrentType
+
+
+                        $InvalidCharacters =
+                            [System.IO.Path]::GetInvalidFileNameChars()
+
+
+                        foreach ($Character in $InvalidCharacters) {
+
+                            $SafeType =
+                                $SafeType.Replace(
+                                    $Character.ToString(),
+                                    "_"
+                                )
+                        }
+
+
+                        # =============================================
+                        # Create type folder
+                        # =============================================
+
+                        $TypeFolder =
+                            Join-Path `
+                                $DatabaseBackupFolder `
+                                $SafeType
+
+
+                        New-Item `
+                            -ItemType Directory `
+                            -Force `
+                            -Path $TypeFolder |
+                            Out-Null
+
+
+                        # =============================================
+                        # Actual CouchDB _id
+                        # =============================================
+
+                        $DocumentId =
+                            [string]$Document._id
+
+
+                        # =============================================
+                        # Filename
+                        # =============================================
+
+                        $SafeFileName =
+                            "$DocumentId.json"
+
+
+                        foreach ($Character in $InvalidCharacters) {
+
+                            $SafeFileName =
+                                $SafeFileName.Replace(
+                                    $Character.ToString(),
+                                    "_"
+                                )
+                        }
+
+
+                        # =============================================
+                        # Final file path
+                        # =============================================
+
+                        $OutputFile =
+                            Join-Path `
+                                $TypeFolder `
+                                $SafeFileName
+
+
+                        # =============================================
+                        # Save complete document
+                        # =============================================
+
+                        $DocumentJson =
+                            $Document | ConvertTo-Json -Depth 100
+
+
+                        [System.IO.File]::WriteAllText(
+                            $OutputFile,
+                            $DocumentJson,
+                            [System.Text.UTF8Encoding]::new($false)
+                        )
+
+
+                        # =============================================
+                        # Counters
+                        # =============================================
+
+                        $DatabaseSavedCount++
+                        $TotalSaved++
+
+
+                        if ($TypeCounts.ContainsKey($CurrentType)) {
+
+                            $TypeCounts[$CurrentType]++
+
+                        }
+
+                        else {
+
+                            $TypeCounts[$CurrentType] = 1
+                        }
+
+
+                        Write-Host "Saved:"
+                        Write-Host "  Database : $Database"
+                        Write-Host "  Type     : $CurrentType"
+                        Write-Host "  _id      : $DocumentId"
+                        Write-Host "  File     : $OutputFile"
+                        Write-Host ""
+                    }
+
+
+                    # =================================================
+                    # Database Summary
+                    # =================================================
+
+                    Write-Host ""
+                    Write-Host "------------------------------------------"
+                    Write-Host "Database Summary: $Database"
+                    Write-Host "------------------------------------------"
+
+
+                    foreach ($TypeName in ($TypeCounts.Keys | Sort-Object)) {
+
+                        Write-Host `
+                            "$TypeName : $($TypeCounts[$TypeName])"
+                    }
+
+
+                    Write-Host ""
+                    Write-Host "Saved   : $DatabaseSavedCount"
+                    Write-Host "Skipped : $DatabaseSkippedCount"
+                    Write-Host "------------------------------------------"
+                    Write-Host ""
+
+
+                    # =================================================
+                    # Database summary JSON
+                    # =================================================
+
+                    $DatabaseSummary =
+                        [PSCustomObject]@{
+
+                            database =
+                                $Database
+
+                            backup_mode =
+                                $DocumentType
+
+                            documents_found =
+                                $Documents.Count
+
+                            documents_backed_up =
+                                $DatabaseSavedCount
+
+                            documents_skipped =
+                                $DatabaseSkippedCount
+
+                            backup_timestamp =
+                                (Get-Date).ToString(
+                                    "yyyy-MM-dd HH:mm:ss"
+                                )
+
+                            jenkins_build =
+                                $env:BUILD_NUMBER
+
+                            backup_directory =
+                                $DatabaseBackupFolder
+
+                            document_type_counts =
+                                $TypeCounts
+                        }
+
+
+                    $SummaryFile =
+                        Join-Path `
+                            $DatabaseBackupFolder `
+                            "backup_summary.json"
+
+
+                    $DatabaseSummary |
+                        ConvertTo-Json -Depth 100 |
+                        Out-File `
+                            -FilePath $SummaryFile `
+                            -Encoding utf8
+                }
+
+
+                # ====================================================
+                # Final Summary
+                # ====================================================
+
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "ALL DATABASE BACKUPS COMPLETED"
+                Write-Host "=========================================="
+                Write-Host "Databases Processed : $($DatabaseList.Count)"
+                Write-Host "Total Documents     : $TotalSaved"
+                Write-Host "Total Skipped       : $TotalSkipped"
+                Write-Host "Backup Root         : $CouchDBBackupRoot"
+                Write-Host "=========================================="
+                Write-Host ""
+
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // 6. Verify Backup
+        // ============================================================
+
+        stage('Verify Backup') {
+
+            steps {
+
+                powershell '''
+
+                $ErrorActionPreference = "Stop"
+
+                $BackupRoot =
+                    Join-Path `
+                        "${env:BACKUP_FOLDER}" `
+                        "couchdb"
+
+
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "Verifying CouchDB Backup"
+                Write-Host "=========================================="
+                Write-Host "Backup Root: $BackupRoot"
+                Write-Host ""
+
+
+                if (!(Test-Path $BackupRoot)) {
+
+                    throw `
+                        "CouchDB backup folder does not exist: $BackupRoot"
+                }
+
+
+                # ====================================================
+                # Get all selected databases
+                # ====================================================
+
+                $DatabaseList =
+                    "${env:COUCH_DATABASE}" -split ',' |
+                    ForEach-Object {
+                        $_.Trim()
+                    } |
+                    Where-Object {
+                        $_ -ne ""
+                    }
+
+
+                $TotalDocumentFiles = 0
+                $DatabasesWithBackup = 0
+                $EmptyDatabases = 0
+
+
+                # ====================================================
+                # Verify each database separately
+                # ====================================================
+
+                foreach ($Database in $DatabaseList) {
+
+                    $DatabaseFolder =
+                        Join-Path `
+                            $BackupRoot `
+                            $Database
+
+
+                    Write-Host ""
+                    Write-Host "------------------------------------------"
+                    Write-Host "Database: $Database"
+                    Write-Host "------------------------------------------"
+
+
+                    if (!(Test-Path $DatabaseFolder)) {
+
+                        Write-Warning `
+                            "No backup folder created for database '$Database'."
+
+                        $EmptyDatabases++
+
+                        continue
+                    }
+
+
+                    # =================================================
+                    # Find document JSON files
+                    # =================================================
+
+                    $DocumentFiles =
+                        Get-ChildItem `
+                            -Path $DatabaseFolder `
+                            -Filter "*.json" `
+                            -File `
+                            -Recurse |
+                        Where-Object {
+                            $_.Name -ne "backup_summary.json"
+                        }
+
+
+                    $DocumentCount =
+                        @($DocumentFiles).Count
+
+
+                    if ($DocumentCount -eq 0) {
+
+                        Write-Warning `
+                            "Database '$Database' contains no backed-up documents."
+
+                        Write-Host `
+                            "This database may be empty. Skipping verification failure."
+
+                        $EmptyDatabases++
+
+                        continue
+                    }
+
+
+                    # =================================================
+                    # Database contains backup
+                    # =================================================
+
+                    $DatabasesWithBackup++
+
+                    $TotalDocumentFiles +=
+                        $DocumentCount
+
+
+                    Write-Host ""
+                    Write-Host "Document backup files: $DocumentCount"
+                    Write-Host ""
+
+
+                    foreach ($File in $DocumentFiles) {
+
+                        Write-Host "  $($File.FullName)"
+                    }
+                }
+
+
+                # ====================================================
+                # Final verification
+                # ====================================================
+
+                Write-Host ""
+                Write-Host "=========================================="
+                Write-Host "Backup Verification Summary"
+                Write-Host "=========================================="
+                Write-Host "Selected Databases : $($DatabaseList.Count)"
+                Write-Host "Databases Backed Up: $DatabasesWithBackup"
+                Write-Host "Empty Databases    : $EmptyDatabases"
+                Write-Host "Document JSON Files: $TotalDocumentFiles"
+                Write-Host "=========================================="
+                Write-Host ""
+
+
+                # ====================================================
+                # Fail only when no backup was created
+                # ====================================================
+
+                if ($TotalDocumentFiles -eq 0) {
+
+                    throw `
+                        "No document backups were created from any selected database."
+                }
+
+
+                Write-Host ""
+                Write-Host "Backup verification successful."
+                Write-Host ""
+                Write-Host "Empty databases were skipped without failing the pipeline."
+                Write-Host "=========================================="
+
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // 7. Create CouchDB Backup Artifact
+        // ============================================================
+
+        stage('Create CouchDB Backup Artifact') {
+
+            steps {
+
+                script {
+
+                    env.ARTIFACT_NAME =
+                        "CouchDB-Backup-v${env.BACKUP_VERSION}-build${env.BUILD_NUMBER}.tar.gz"
+
+
+                    env.ARTIFACT_FOLDER =
+                        "${env.ROOT_BACKUP}\\artifacts"
+
+
+                    env.ARTIFACT_PATH =
+                        "${env.ARTIFACT_FOLDER}\\${env.ARTIFACT_NAME}"
+
+
+                    echo ''
+                    echo '=========================================='
+                    echo 'Creating CouchDB Backup Artifact'
+                    echo '=========================================='
+                    echo "Backup Source : ${env.BACKUP_FOLDER}"
+                    echo "Artifact      : ${env.ARTIFACT_PATH}"
+                    echo '=========================================='
+                    echo ''
+
+
+                    powershell """
+
+                    \$ErrorActionPreference = "Stop"
+
+
+                    \$BackupFolder =
+                        "${env.BACKUP_FOLDER}"
+
+
+                    \$ArtifactFolder =
+                        "${env.ARTIFACT_FOLDER}"
+
+
+                    \$ArtifactPath =
+                        "${env.ARTIFACT_PATH}"
+
+
+                    # =================================================
+                    # Validate backup folder
+                    # =================================================
+
+                    if (!(Test-Path \$BackupFolder)) {
+
+                        throw `
+                            "Backup folder does not exist: \$BackupFolder"
+                    }
+
+
+                    # =================================================
+                    # Create artifact directory
+                    # =================================================
+
+                    New-Item `
+                        -ItemType Directory `
+                        -Force `
+                        -Path \$ArtifactFolder |
+                        Out-Null
+
+
+                    # =================================================
+                    # Remove existing artifact
+                    # =================================================
+
+                    if (Test-Path \$ArtifactPath) {
+
+                        Remove-Item `
+                            -Force `
+                            \$ArtifactPath
+                    }
+
+
+                    # =================================================
+                    # Create TAR.GZ
+                    # =================================================
+
+                    Write-Host ""
+                    Write-Host "Creating CouchDB backup archive..."
+                    Write-Host ""
+
+
+                    tar.exe `
+                        -czf `
+                        "\$ArtifactPath" `
+                        -C "\$BackupFolder" `
+                        .
+
+
+                    if (\$LASTEXITCODE -ne 0) {
+
+                        throw `
+                            "Failed to create CouchDB backup artifact."
+                    }
+
+
+                    # =================================================
+                    # Verify artifact
+                    # =================================================
+
+                    if (!(Test-Path \$ArtifactPath)) {
+
+                        throw `
+                            "Artifact was not created: \$ArtifactPath"
+                    }
+
+
+                    \$ArtifactInfo =
+                        Get-Item \$ArtifactPath
+
+
+                    Write-Host ""
+                    Write-Host "=========================================="
+                    Write-Host "Artifact Created Successfully"
+                    Write-Host "=========================================="
+                    Write-Host "Name : \$($ArtifactInfo.Name)"
+                    Write-Host "Size : \$([Math]::Round(\$ArtifactInfo.Length / 1MB, 2)) MB"
+                    Write-Host "Path : \$($ArtifactInfo.FullName)"
+                    Write-Host "=========================================="
+                    Write-Host ""
+
+                    """
+                }
+            }
+        }
+
+
+        // ============================================================
+        // 8. Upload CouchDB Backup to Nexus
+        // ============================================================
+
+        stage('Upload CouchDB Backup to Nexus') {
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+
+                    @echo off
+                    setlocal
+
+
+                    echo ==========================================
+                    echo Uploading CouchDB Backup to Nexus
+                    echo ==========================================
+
+
+                    if not exist "${ARTIFACT_PATH}" (
+
+                        echo ERROR: Backup artifact not found:
+                        echo ${ARTIFACT_PATH}
+
+                        exit /b 1
+                    }
+
+
+                    echo.
+                    echo Artifact:
+                    echo ${ARTIFACT_NAME}
+
+
+                    echo.
+                    echo Nexus URL:
+                    echo ${NEXUS_URL}
+
+
+                    echo.
+                    echo Nexus Repository:
+                    echo ${NEXUS_REPO}
+
+
+                    echo.
+                    echo Backup Date:
+                    echo ${BACKUP_DATE}
+
+
+                    echo.
+                    echo Backup Time:
+                    echo ${BACKUP_TIME}
+
+
+                    echo.
+                    echo Document Type:
+                    echo ${DOCUMENT_TYPE}
+
+
+                    echo.
+                    echo Uploading artifact...
+
+
+                    curl.exe ^
+                    -s ^
+                    -o nul ^
+                    -w "%%{http_code}" ^
+                    -u "%NEXUS_USER%:%NEXUS_PASSWORD%" ^
+                    --upload-file "${ARTIFACT_PATH}" ^
+                    "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_BACKUP_ROOT}/${BACKUP_DATE}/${BACKUP_TIME}-build${BUILD_NUMBER}/${DOCUMENT_TYPE}/${ARTIFACT_NAME}" ^
+                    > nexus_http_code.txt
+
+
+                    set /p HTTP_CODE=<nexus_http_code.txt
+
+
+                    echo.
+                    echo Nexus HTTP Response: %HTTP_CODE%
+                    echo.
+
+
+                    if "%HTTP_CODE%"=="200" goto success
+                    if "%HTTP_CODE%"=="201" goto success
+                    if "%HTTP_CODE%"=="204" goto success
+
+
+                    echo ==========================================
+                    echo ERROR: Nexus Upload Failed
+                    echo ==========================================
+
+                    exit /b 1
+
+
+                    :success
+
+                    echo ==========================================
+                    echo Nexus Upload Successful
+                    echo ==========================================
+                    echo.
+                    echo Nexus Repository:
+                    echo ${NEXUS_REPO}
+                    echo.
+                    echo Nexus Path:
+                    echo ${NEXUS_BACKUP_ROOT}/${BACKUP_DATE}/${BACKUP_TIME}-build${BUILD_NUMBER}/${DOCUMENT_TYPE}/${ARTIFACT_NAME}
+                    echo.
+                    echo ==========================================
+
+
+                    """
+                }
+            }
+        }
+    }
+
+
+    // ================================================================
+    // Post Actions
+    // ================================================================
+
+    post {
+
+        success {
+
+            echo """
+            ==========================================
+            COUCHDB BACKUP SUCCESSFUL
+            ==========================================
+
+            Backup Folder:
+            ${env.BACKUP_FOLDER}
+
+            Artifact:
+            ${env.ARTIFACT_NAME}
+
+            Nexus Repository:
+            ${env.NEXUS_REPO}
+
+            Nexus Path:
+            ${env.NEXUS_BACKUP_ROOT}/${env.BACKUP_DATE}/${env.BACKUP_TIME}-build${env.BUILD_NUMBER}/${env.DOCUMENT_TYPE}/${env.ARTIFACT_NAME}
+
+            ==========================================
+            """
+        }
+
+
+        failure {
+
+            echo """
+            ==========================================
+            COUCHDB BACKUP FAILED
+            ==========================================
+
+            Please check the Jenkins console logs.
+
+            ==========================================
+            """
+        }
+
+
+        always {
+
+            cleanWs()
+        }
+    }
+}

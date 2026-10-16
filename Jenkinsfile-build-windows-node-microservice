@@ -1,0 +1,331 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: '',
+            description: 'Jenkins project agent label where this pipeline will run (format: project-env-ip, eg: copper-dev-10.10.3.150)'
+        )
+
+        string(
+            name: 'PROJECT_BRANCH',
+            defaultValue: '',
+            description: 'Project source code branch to checkout for build/deployment eg: qasip_devops'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['D', 'E', 'F'],
+            description: 'Drive where repository and build artifacts will be stored'
+        )
+    }
+
+    environment {
+
+        // Project Configuration
+        PROJECT_NAME    = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        SERVICE_NAME    = 'atms-node-microservice'
+        VERSION         = '1.0.0'
+        BUILD_DATE      = "${new Date().format('dd-MM-yyyy')}"
+        RELEASE_VERSION = "${BUILD_DATE}-v${VERSION}-${BUILD_NUMBER}"
+
+        // Git Configuration
+        GIT_REPO_URL       = 'git@10.10.1.68:andes/atms-node-microservice.git'
+        GIT_CREDENTIALS_ID = 'jenkins-gitlab-118'
+
+        // Nexus Configuration
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        // Repo Configuration
+        REPO_BASE_DIR = "${params.DEPLOY_DRIVE}:\\jenkins\\workspace\\QASIP Build Node-Microservice\\atms-node-microservice"
+        SERVICE_DIR   = "${REPO_BASE_DIR}"
+
+        // Artifact Configuration
+        ARTIFACT_DIR  = "${params.DEPLOY_DRIVE}:\\artifacts"
+        ARTIFACT_NAME = "${SERVICE_NAME}.tar.gz"
+        ARTIFACT_PATH = "${ARTIFACT_DIR}\\${ARTIFACT_NAME}"
+
+        // Nexus Upload
+        NEXUS_UPLOAD_PATH = "${PROJECT_NAME}/windows/${RELEASE_VERSION}/${SERVICE_NAME}/${ARTIFACT_NAME}"
+
+        // Node
+        NODE_OPTIONS = '--max_old_space_size=4096'
+    }
+
+    stages {
+
+        stage('Checkout Repository') {
+            steps {
+
+                dir("${SERVICE_DIR}") {
+                    git branch: "${params.PROJECT_BRANCH}",
+                        credentialsId: "${GIT_CREDENTIALS_ID}",
+                        url: "${GIT_REPO_URL}"
+                }
+
+                bat """
+                    @echo off
+
+                    cd /d "${SERVICE_DIR}"
+
+                    echo ========================================
+                    echo Repository Checkout Successful
+                    echo ========================================
+
+                    git log -1 --oneline
+                """
+            }
+        }
+
+        stage('Installing Node packages for Custom notification service') {
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Installing Custom Notification Dependencies
+                    echo ========================================
+
+                    set "SCRIPT_DIR=${params.DEPLOY_DRIVE}:\\Scripts"
+
+                    cd /d "%SCRIPT_DIR%"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Script directory not found
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo [1/1] Running npm install...
+
+                    call npm install
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: npm install failed
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo npm install completed successfully.
+
+                    echo.
+                    echo Installed files:
+                    dir "%SCRIPT_DIR%"
+
+                    if not exist "%SCRIPT_DIR%\\node_modules" (
+                        echo ERROR: node_modules folder not created
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo All dependencies installed successfully.
+                """
+            }
+        }
+
+        stage('Upload Source Code to Nexus') {
+            steps {
+
+                script {
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: env.NEXUS_CREDENTIALS_ID,
+                            usernameVariable: 'NEXUS_USER',
+                            passwordVariable: 'NEXUS_PASSWORD'
+                        )
+                    ]) {
+
+                        bat """
+                            @echo off
+
+                            echo ========================================
+                            echo Creating Source Archive (.tar.gz)
+                            echo ========================================
+
+                            cd /d "${SERVICE_DIR}"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Service directory not found
+                                exit /b 1
+                            )
+
+                            if not exist "${ARTIFACT_DIR}" (
+                                mkdir "${ARTIFACT_DIR}"
+                            )
+
+                            set SOURCE_ARCHIVE=${ARTIFACT_NAME}
+                            set SOURCE_PATH=${ARTIFACT_DIR}\\%SOURCE_ARCHIVE%
+
+                            if exist "%SOURCE_PATH%" (
+                                del /F /Q "%SOURCE_PATH%"
+                            )
+
+                            echo Creating tar.gz package...
+                            tar -czf "%SOURCE_PATH%" .
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to create tar.gz archive
+                                exit /b 1
+                            )
+
+                            echo ========================================
+                            echo Uploading Source Archive to Nexus
+                            echo ========================================
+
+                            curl.exe -s -o nul -w "%%{http_code}" ^
+                            -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                            --upload-file "%SOURCE_PATH%" ^
+                            "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/windows/${RELEASE_VERSION}/${SERVICE_NAME}/${ARTIFACT_NAME}" > http_code.txt
+
+                            set /p HTTP_CODE=<http_code.txt
+                            del http_code.txt
+
+                            echo HTTP Response Code: %HTTP_CODE%
+
+                            if "%HTTP_CODE%"=="201" (
+                                echo Source uploaded successfully!
+                            ) else (
+                                echo ERROR: Upload failed with HTTP code: %HTTP_CODE%
+                                exit /b 1
+                            )
+
+                            del /F /Q "%SOURCE_PATH%"
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Create Artifact') {
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Creating Artifact
+                    echo ========================================
+
+                    if not exist "${ARTIFACT_DIR}" (
+                        mkdir "${ARTIFACT_DIR}"
+                    )
+
+                    cd /d "${SERVICE_DIR}"
+
+                    if exist "${ARTIFACT_PATH}" (
+                        del /F /Q "${ARTIFACT_PATH}"
+                    )
+
+                    tar -czf "${ARTIFACT_PATH}" .
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Artifact creation failed
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Artifact Created Successfully:
+                    echo ${ARTIFACT_PATH}
+                """
+            }
+        }
+
+        stage('Upload Artifact') {
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${NEXUS_CREDENTIALS_ID}",
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        @echo off
+
+                        echo ========================================
+                        echo Uploading Artifact to Nexus
+                        echo ========================================
+
+                        curl.exe -s -o nul -w "%%{http_code}" ^
+                        -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                        --upload-file "${ARTIFACT_PATH}" ^
+                        "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}" > response.txt
+
+                        set /p HTTP_CODE=<response.txt
+                        del response.txt
+
+                        echo HTTP Response: %HTTP_CODE%
+
+                        if "%HTTP_CODE%"=="201" (
+                            echo Upload Successful
+                            exit /b 0
+                        ) else (
+                            echo Upload Failed
+                            exit /b 1
+                        )
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+
+        success {
+
+            echo """
+            ========================================
+            BUILD SUCCESSFUL
+            ========================================
+
+            Service Name    : ${SERVICE_NAME}
+            Branch          : ${params.PROJECT_BRANCH}
+            Release Version : ${RELEASE_VERSION}
+
+            Artifact:
+            ${ARTIFACT_PATH}
+
+            Nexus Path:
+            ${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}
+
+            ========================================
+            """
+        }
+
+        failure {
+
+            echo """
+            ========================================
+            BUILD FAILED
+            ========================================
+            """
+        }
+
+        always {
+            cleanWs()
+        }
+    }
+}

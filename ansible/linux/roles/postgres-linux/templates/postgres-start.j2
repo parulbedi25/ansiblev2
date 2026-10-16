@@ -1,0 +1,2 @@
+#!/bin/bash
+sudo -u postgres {{ postgresql_install_dir }}/bin/pg_ctl start -D {{ postgresql_data_dir }} -l {{ postgresql_log_dir }}/postgresql.log

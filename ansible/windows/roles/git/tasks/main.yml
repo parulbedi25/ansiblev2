@@ -1,0 +1,53 @@
+---
+# tasks file for roles/git
+- name: Create temp directory
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+- name: Check if git.exe already exists
+  win_stat:
+    path: "{{ git_install_dir }}\\cmd\\git.exe"
+  register: git_exe_check
+
+- name: Download Git {{ git_version }} installer
+  win_get_url:
+    url: "{{ git_url }}"
+    dest: "{{ temp_dir }}\\{{ git_installer }}"
+  when: not git_exe_check.stat.exists
+
+- name: Install Git {{ git_version }}
+  win_package:
+    path: "{{ temp_dir }}\\{{ git_installer }}"
+    arguments: /VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /COMPONENTS="icons,ext\reg\shellhere,assoc,assoc_sh"
+    product_id: Git_is1
+    state: present
+  when: not git_exe_check.stat.exists
+
+- name: Ensure Git is in system PATH
+  win_path:
+    elements:
+      - "{{ git_install_dir }}\\cmd"
+    scope: machine
+    state: present
+
+- name: Reset connection to refresh PATH
+  meta: reset_connection
+
+- name: Verify Git installation
+  win_command: git --version
+  register: git_verify
+  changed_when: false
+  failed_when: false
+
+- name: Display Git version
+  debug:
+    msg: "Git version: {{ git_verify.stdout | trim }}"
+  when: git_verify.rc == 0
+
+- name: Fail if Git is not installed
+  fail:
+    msg: >
+      Git is not installed or not available in PATH.
+      Please install Git before continuing.
+  when: git_verify.rc != 0

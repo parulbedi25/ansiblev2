@@ -1,0 +1,438 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: 'copper-dev-10.10.12.78',
+            description: 'Jenkins agent label'
+        )
+
+        string(
+            name: 'PROJECT_BRANCH',
+            defaultValue: 'qasip_devops',
+            description: 'Git branch name'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma separated email addresses'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['D', 'E', 'F'],
+            description: 'Drive for workspace and artifacts'
+        )
+    }
+
+    environment {
+
+        // Project
+        PROJECT_NAME    = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        SERVICE_NAME    = 'atms-ui'
+        VERSION         = '1.0.0'
+        BUILD_DATE      = "${new Date().format('dd-MM-yyyy')}"
+        RELEASE_VERSION = "${BUILD_DATE}-v${VERSION}-${BUILD_NUMBER}"
+
+        // Git
+        GIT_REPO_URL       = 'git@10.10.1.68:andes/atms-ui.git'
+        GIT_CREDENTIALS_ID = 'jenkins-gitlab-118'
+
+        // Nexus
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        // Workspace Paths
+        REPO_BASE_DIR = "${params.DEPLOY_DRIVE}:\\jenkins\\workspace\\QASIP Build ATMS-UI\\atms-ui"
+        SERVICE_DIR   = "${REPO_BASE_DIR}"
+
+        // Build Artifact
+        ARTIFACT_DIR  = "${params.DEPLOY_DRIVE}:\\artifacts"
+        ARTIFACT_NAME = "atms-ui.tar.gz"
+        ARTIFACT_PATH = "${ARTIFACT_DIR}\\${ARTIFACT_NAME}"
+
+
+        // Shared Modules
+        MODULES_ARCHIVE_NAME = 'modules.tar.gz'
+        MODULES_DOWNLOAD_URL = "${NEXUS_URL}/repository/${NEXUS_REPO}/common/${MODULES_ARCHIVE_NAME}"
+        MODULES_ARCHIVE_PATH = "${SERVICE_DIR}\\${MODULES_ARCHIVE_NAME}"
+
+
+        // Nexus Upload
+        NEXUS_UPLOAD_PATH = "${PROJECT_NAME}/windows/${RELEASE_VERSION}/${SERVICE_NAME}/${ARTIFACT_NAME}"
+
+        // Node
+        NODE_OPTIONS = '--max_old_space_size=4096'
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+
+            steps {
+
+                script {
+
+                    if (!params.PROJECT_TARGET_MACHINE?.trim()) {
+                        error("PROJECT_TARGET_MACHINE is required")
+                    }
+
+                    if (!params.PROJECT_BRANCH?.trim()) {
+                        error("PROJECT_BRANCH is required")
+                    }
+
+                    echo """
+                    ========================================
+                    BUILD CONFIGURATION
+                    ========================================
+
+                    Agent            : ${params.PROJECT_TARGET_MACHINE}
+                    Branch           : ${params.PROJECT_BRANCH}
+                    Release Version  : ${RELEASE_VERSION}
+
+                    Repository       : ${GIT_REPO_URL}
+
+                    Workspace        : ${SERVICE_DIR}
+
+                    Artifact Path    : ${ARTIFACT_PATH}
+
+                    Nexus Upload URL :
+                    ${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}
+
+                    ========================================
+                    """
+                }
+            }
+        }
+
+
+        stage('Checkout Repository') {
+
+            steps {
+
+                dir("${SERVICE_DIR}") {
+
+                    git branch: "${params.PROJECT_BRANCH}",
+                        credentialsId: "${GIT_CREDENTIALS_ID}",
+                        url: "${GIT_REPO_URL}"
+                }
+
+                bat """
+                    @echo off
+
+                    cd /d "${SERVICE_DIR}"
+
+                    echo ========================================
+                    echo Repository Checkout Successful
+                    echo ========================================
+
+                    git log -1 --oneline
+                """
+            }
+        }
+
+
+        stage('Download Shared Modules') {
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${NEXUS_CREDENTIALS_ID}",
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        @echo off
+
+                        echo ========================================
+                        echo Downloading Shared Modules
+                        echo ========================================
+
+                        curl.exe ^
+                        -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                        -L ^
+                        -o "${MODULES_ARCHIVE_PATH}" ^
+                        "${MODULES_DOWNLOAD_URL}"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download
+                            exit /b 1
+                        )
+
+                        echo.
+                        echo Download Successful:
+                        echo ${MODULES_ARCHIVE_PATH}
+
+                        echo.
+                        echo ========================================
+                        echo Cleaning Old Dependencies
+                        echo ========================================
+
+                        if exist "${SERVICE_DIR}\\node_modules" (
+                            rmdir /S /Q "${SERVICE_DIR}\\node_modules"
+                        )
+
+                        if exist "${SERVICE_DIR}\\bower_components" (
+                            rmdir /S /Q "${SERVICE_DIR}\\bower_components"
+                        )
+
+                        echo Old dependencies removed.
+
+                        echo.
+                        echo ========================================
+                        echo Extracting into SERVICE_DIR
+                        echo ========================================
+
+                        tar -xzf "${MODULES_ARCHIVE_PATH}" -C "${SERVICE_DIR}"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Extraction failed
+                            exit /b 1
+                        )
+
+                        echo Extraction completed successfully.
+
+                        del /F /Q "${MODULES_ARCHIVE_PATH}"
+
+                        echo modules.zip removed after extraction.
+                    """
+                }
+            }
+        }
+
+
+        stage('Install UI Dependencies') {
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    echo ========================================
+                    echo Installing atms-ui Dependencies
+                    echo ========================================
+
+                    cd /d "${SERVICE_DIR}"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Application directory not found
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo [1/3] Running npm install...
+                    call npm install
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: npm install failed
+                        exit /b 1
+                    )
+
+                    echo npm install completed successfully.
+
+                    echo.
+                    echo [2/3] Checking Bower Installation...
+
+                    call npx bower --version >nul 2>&1
+
+                    if %ERRORLEVEL% NEQ 0 (
+
+                        echo Bower not found. Installing globally...
+
+                        call npm install -g bower
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to install bower
+                            exit /b 1
+                        )
+
+                        echo Bower installed successfully.
+
+                    ) else (
+
+                        echo Bower already installed.
+                    )
+
+                    echo.
+                    echo [3/3] Running bower install...
+
+                    call npx bower install --allow-root
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: bower install failed
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo All dependencies installed successfully.
+                """
+            }
+        }
+
+
+        stage('Build atms-ui') {
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    cd /d "${SERVICE_DIR}"
+
+                    echo ========================================
+                    echo Building atms-ui
+                    echo ========================================
+
+                    if exist "dist" (
+                        rmdir /S /Q dist
+                    )
+
+                    call npx gulp build --api_host=http://localhost:8080
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Build failed
+                        exit /b 1
+                    )
+
+                    if not exist "dist" (
+                        echo ERROR: dist folder not generated
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Build completed successfully.
+                """
+            }
+        }
+
+
+
+        stage('Create Artifact') {
+
+            steps {
+
+                bat """
+                    @echo off
+
+                    cd /d "${SERVICE_DIR}"
+
+                    echo ========================================
+                    echo Creating Artifact
+                    echo ========================================
+
+                    if exist "${ARTIFACT_PATH}" (
+                        del /F /Q "${ARTIFACT_PATH}"
+                    )
+
+                    tar -czf "${ARTIFACT_PATH}" -C dist .
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Artifact creation failed
+                        exit /b 1
+                    )
+
+                    echo.
+                    echo Artifact Created Successfully:
+                    echo ${ARTIFACT_PATH}
+                """
+            }
+        }
+
+
+
+        stage('Upload Artifact') {
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${NEXUS_CREDENTIALS_ID}",
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                    bat """
+                        @echo off
+
+                        echo ========================================
+                        echo Uploading Artifact to Nexus
+                        echo ========================================
+
+                        curl.exe -s -o nul -w "%%{http_code}" ^
+                        -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                        --upload-file "${ARTIFACT_PATH}" ^
+                        "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}" > response.txt
+
+                        set /p HTTP_CODE=<response.txt
+                        del response.txt
+
+                        echo HTTP Response: %HTTP_CODE%
+
+                        if "%HTTP_CODE%"=="201" (
+                            echo Upload Successful
+                            exit /b 0
+                        ) else (
+                            echo Upload Failed
+                            exit /b 1
+                        )
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+
+        success {
+
+            echo """
+            ========================================
+            BUILD SUCCESSFUL
+            ========================================
+
+            Service Name    : ${SERVICE_NAME}
+            Branch          : ${params.PROJECT_BRANCH}
+            Release Version : ${RELEASE_VERSION}
+
+            Artifact:
+            ${ARTIFACT_PATH}
+
+            Nexus Path:
+            ${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}
+
+            ========================================
+            """
+        }
+
+        failure {
+
+            echo """
+            ========================================
+            BUILD FAILED
+            ========================================
+            """
+        }
+
+        always {
+
+            cleanWs()
+        }
+    }
+}
+

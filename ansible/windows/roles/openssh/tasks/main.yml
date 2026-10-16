@@ -1,0 +1,177 @@
+---
+- name: Ensure at least one OpenSSH component is requested
+  assert:
+    that:
+      - openssh_manage_client or openssh_manage_server
+    fail_msg: "Both openssh_manage_client and openssh_manage_server are false. Enable at least one component."
+
+- name: Verify Windows capability cmdlets are available
+  win_shell: |
+    if ((Get-Command Get-WindowsCapability -ErrorAction SilentlyContinue) -and
+        (Get-Command Add-WindowsCapability -ErrorAction SilentlyContinue)) {
+      Write-Output "supported=1"
+      exit 0
+    }
+    Write-Output "supported=0"
+    exit 0
+  register: openssh_capability_cmdlets
+  changed_when: false
+
+- name: Fail when Windows capability cmdlets are not available
+  fail:
+    msg: >
+      Get-WindowsCapability/Add-WindowsCapability cmdlets are unavailable on this host.
+      OpenSSH automatic setup requires a supported Windows version.
+  when: "'supported=1' not in openssh_capability_cmdlets.stdout"
+
+- name: Ensure OpenSSH Client capability is installed
+  win_shell: |
+    $cap = Get-WindowsCapability -Online -Name "{{ openssh_client_capability_name }}"
+    if ($cap.State -eq "Installed") {
+      Write-Output "changed=0"
+      exit 0
+    }
+
+    Add-WindowsCapability -Online -Name "{{ openssh_client_capability_name }}" | Out-Null
+    Write-Output "changed=1"
+  register: openssh_client_install
+  changed_when: "'changed=1' in openssh_client_install.stdout"
+  when: openssh_manage_client | bool
+
+- name: Verify OpenSSH Client capability is installed
+  win_shell: |
+    (Get-WindowsCapability -Online -Name "{{ openssh_client_capability_name }}").State
+  register: openssh_client_state
+  changed_when: false
+  when: openssh_manage_client | bool
+
+- name: Fail if OpenSSH Client capability is not installed
+  fail:
+    msg: "OpenSSH Client capability is not installed. Current state: {{ openssh_client_state.stdout | trim }}"
+  when:
+    - openssh_manage_client | bool
+    - (openssh_client_state.stdout | trim) != "Installed"
+
+- name: Ensure OpenSSH Server capability is installed
+  win_shell: |
+    $cap = Get-WindowsCapability -Online -Name "{{ openssh_server_capability_name }}"
+    if ($cap.State -eq "Installed") {
+      Write-Output "changed=0"
+      exit 0
+    }
+
+    Add-WindowsCapability -Online -Name "{{ openssh_server_capability_name }}" | Out-Null
+    Write-Output "changed=1"
+  register: openssh_server_install
+  changed_when: "'changed=1' in openssh_server_install.stdout"
+  when: openssh_manage_server | bool
+
+- name: Verify OpenSSH Server capability is installed
+  win_shell: |
+    (Get-WindowsCapability -Online -Name "{{ openssh_server_capability_name }}").State
+  register: openssh_server_state
+  changed_when: false
+  when: openssh_manage_server | bool
+
+- name: Fail if OpenSSH Server capability is not installed
+  fail:
+    msg: "OpenSSH Server capability is not installed. Current state: {{ openssh_server_state.stdout | trim }}"
+  when:
+    - openssh_manage_server | bool
+    - (openssh_server_state.stdout | trim) != "Installed"
+
+- name: Ensure OpenSSH bin path is in system PATH
+  win_path:
+    elements:
+      - "{{ openssh_bin_path }}"
+    scope: machine
+    state: present
+
+- name: Ensure ssh.exe command is available
+  win_shell: |
+    $env:Path += ";{{ openssh_bin_path }}"
+    if (Get-Command ssh.exe -ErrorAction SilentlyContinue) {
+      exit 0
+    }
+    exit 1
+  changed_when: false
+  when: openssh_manage_client | bool
+
+- name: Ensure sshd.exe command is available
+  win_shell: |
+    if (Get-Command sshd.exe -ErrorAction SilentlyContinue) {
+      exit 0
+    }
+    exit 1
+  changed_when: false
+  when: openssh_manage_server | bool
+
+- name: Ensure ssh-agent service startup mode is manual
+  win_service:
+    name: "{{ openssh_agent_service_name }}"
+  register: openssh_agent_service_info
+  failed_when: false
+  when: openssh_manage_client | bool
+
+- name: Fail when ssh-agent service is missing
+  fail:
+    msg: "Expected service '{{ openssh_agent_service_name }}' was not found after OpenSSH Client installation."
+  when:
+    - openssh_manage_client | bool
+    - not (openssh_agent_service_info.exists | default(false))
+
+- name: Ensure ssh-agent service startup mode is manual
+  win_service:
+    name: "{{ openssh_agent_service_name }}"
+    start_mode: manual
+    state: stopped
+  when: openssh_manage_client | bool
+
+- name: Check sshd service presence
+  win_service:
+    name: "{{ openssh_server_service_name }}"
+  register: openssh_sshd_service_info
+  failed_when: false
+  when: openssh_manage_server | bool
+
+- name: Fail when sshd service is missing
+  fail:
+    msg: "Expected service '{{ openssh_server_service_name }}' was not found after OpenSSH Server installation."
+  when:
+    - openssh_manage_server | bool
+    - not (openssh_sshd_service_info.exists | default(false))
+
+- name: Ensure sshd service is enabled and running
+  win_service:
+    name: "{{ openssh_server_service_name }}"
+    start_mode: auto
+    state: started
+  when: openssh_manage_server | bool
+
+- name: Ensure OpenSSH inbound firewall rule exists for sshd
+  win_firewall_rule:
+    name: "{{ openssh_firewall_rule_name }}"
+    localport: "{{ openssh_server_port }}"
+    action: allow
+    direction: in
+    protocol: tcp
+    state: present
+    enabled: true
+    profiles:
+      - domain
+      - private
+      - public
+  when: openssh_manage_server | bool
+
+- name: Wait for sshd listener to be reachable
+  win_wait_for:
+    port: "{{ openssh_server_port }}"
+    timeout: 30
+    delay: 2
+  when: openssh_manage_server | bool
+
+- name: Configure sshd_config
+  ansible.windows.win_template:
+    src: sshd_config.j2
+    dest: C:\ProgramData\ssh\sshd_config
+  notify: Restart SSH

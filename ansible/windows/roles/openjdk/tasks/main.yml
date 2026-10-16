@@ -1,0 +1,105 @@
+---
+# tasks file for roles/openjdk
+
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+############################
+# OpenJDK 8 (Application)
+############################
+- name: Check if OpenJDK 8 is already installed
+  win_stat:
+    path: "C:\\Program Files\\OpenJDK\\jdk8u{{ openjdk8_build }}-b06\\bin\\java.exe"
+  register: openjdk8_check
+
+- name: Download OpenJDK 8 ZIP
+  win_get_url:
+    url: "{{ openjdk8_url }}"
+    dest: "{{ temp_dir }}\\{{ openjdk8_zip }}"
+  when: not openjdk8_check.stat.exists
+
+- name: Extract OpenJDK 8 ZIP
+  win_unzip:
+    src: "{{ temp_dir }}\\{{ openjdk8_zip }}"
+    dest: "C:\\Program Files\\OpenJDK"
+    creates: "C:\\Program Files\\OpenJDK\\jdk8u{{ openjdk8_build }}-b06"
+  when: not openjdk8_check.stat.exists
+
+- name: Set JAVA_HOME to OpenJDK 8
+  win_environment:
+    name: JAVA_HOME
+    value: "C:\\Program Files\\OpenJDK\\jdk8u{{ openjdk8_build }}-b06"
+    level: machine
+    state: present
+
+- name: Add OpenJDK 8 to system PATH
+  win_path:
+    elements:
+      - "C:\\Program Files\\OpenJDK\\jdk8u{{ openjdk8_build }}-b06\\bin"
+    scope: machine
+    state: present
+
+############################
+# OpenJDK 17 (Jenkins Agent)
+############################
+- name: Ensure C:\Java directory exists
+  win_file:
+    path: C:\Java
+    state: directory
+
+- name: Check if OpenJDK 17 is already installed
+  win_stat:
+    path: "C:\\Java\\jdk17\\bin\\java.exe"
+  register: openjdk17_check
+
+- name: Download OpenJDK 17 ZIP
+  win_get_url:
+    url: "{{ openjdk17_url }}"
+    dest: "{{ temp_dir }}\\{{ openjdk17_zip }}"
+  when: not openjdk17_check.stat.exists
+
+- name: Extract OpenJDK 17 ZIP to temp
+  win_unzip:
+    src: "{{ temp_dir }}\\{{ openjdk17_zip }}"
+    dest: "{{ temp_dir }}\\openjdk17_temp"
+    delete_archive: false
+  when: not openjdk17_check.stat.exists
+
+- name: Locate extracted OpenJDK 17 directory
+  win_find:
+    paths: "{{ temp_dir }}\\openjdk17_temp"
+    file_type: directory
+    depth: 1
+  register: openjdk17_extracted_dirs
+  when: not openjdk17_check.stat.exists
+
+- name: Fail if OpenJDK 17 extraction is invalid
+  fail:
+    msg: "OpenJDK 17 extraction failed or unexpected structure"
+  when:
+    - not openjdk17_check.stat.exists
+    - openjdk17_extracted_dirs.matched != 1
+
+- name: Copy OpenJDK 17 to Jenkins-safe path
+  win_copy:
+    src: "{{ openjdk17_extracted_dirs.files[0].path }}\\"
+    dest: "C:\\Java\\jdk17"
+    remote_src: true
+  when: not openjdk17_check.stat.exists
+
+- name: Validate Jenkins Java 17 binary
+  win_stat:
+    path: "C:\\Java\\jdk17\\bin\\java.exe"
+  register: jenkins_java17
+
+- name: Fail if Jenkins Java 17 is missing
+  fail:
+    msg: "Java 17 not found at C:\\Java\\jdk17\\bin\\java.exe"
+  when: not jenkins_java17.stat.exists
+
+- name: Clean up temporary files
+  win_file:
+    path: "{{ temp_dir }}\\openjdk17_temp"
+    state: absent

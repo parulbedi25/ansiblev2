@@ -1,0 +1,380 @@
+pipeline {
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: '',
+            description: 'Jenkins project agent label where this pipeline will run (format: project-env-ip, eg: copper-dev-10.10.3.150)'
+        )
+
+        string(
+            name: 'BUILD_VERSION',
+            defaultValue: '',
+            description: 'Build version to deploy (example: 17-02-2026-v1.0.0-175)'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['D', 'E', 'F'],
+            description: 'Drive where AI Python service will be deployed'
+        )
+    }
+
+    environment {
+
+
+        // Project Configuration
+        PROJECT_NAME = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
+        SERVICE_NAME = 'AI'
+
+
+        // Nexus Configuration
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+
+        // Deployment Paths
+        AI_DEPLOY_DIR = "${params.DEPLOY_DRIVE}:\\QASIP\\Apps\\python-ai-service"
+        AI_APP_DIR    = "${params.DEPLOY_DRIVE}:\\QASIP\\Apps\\python-ai-service\\test_script_generator"
+
+
+        // Service Configuration
+        PYTHON_SERVICE_NAME = 'ATMS-Python-AI'
+
+
+        // Notification
+        ANSIBLE_OS = "windows"
+    }
+
+    stages {
+
+        // STAGE 1: Validate Parameters
+        stage('Validate Parameters') {
+            steps {
+                script {
+
+                    def missingParams = []
+                    def formatErrors  = []
+
+                    def targetMachine = params.PROJECT_TARGET_MACHINE?.trim()?.toLowerCase()
+                    def buildVersion  = params.BUILD_VERSION?.trim()
+
+                    if (!targetMachine) {
+                        missingParams << "PROJECT_TARGET_MACHINE"
+                    }
+
+                    if (!buildVersion) {
+                        missingParams << "BUILD_VERSION"
+                    }
+
+                    def machineRegex = /^[a-z]+-[a-z]+-(\d{1,3}\.){3}\d{1,3}$/
+
+                    if (targetMachine && !(targetMachine ==~ machineRegex)) {
+                        formatErrors << "Invalid PROJECT_TARGET_MACHINE format"
+                    }
+
+                    def versionRegex = /^(0[1-9]|[12][0-9]|3[01])-(0[1-9]|1[0-2])-\d{4}-v\d+\.\d+\.\d+-\d+$/
+
+                    if (buildVersion && !(buildVersion ==~ versionRegex)) {
+                        formatErrors << "Invalid BUILD_VERSION format"
+                    }
+
+                    if (missingParams || formatErrors) {
+
+                        error """
+                        ====================================================
+                        DEPLOYMENT FAILED - PARAMETER VALIDATION ERROR
+                        ====================================================
+
+                        ${missingParams ? "Missing Parameters:\\n${missingParams.join('\n')}\\n" : ""}
+                        ${formatErrors ? "Format Errors:\\n${formatErrors.join('\n')}\\n" : ""}
+
+                        ====================================================
+                        """
+                    }
+
+                    echo "All parameters validated successfully."
+                    echo "Target Machine : ${targetMachine}"
+                    echo "Build Version  : ${buildVersion}"
+                    echo "Deploy Drive   : ${params.DEPLOY_DRIVE}"
+                }
+            }
+        }
+
+
+        // STAGE 2: Stop Python AI Service
+        stage('Stop Python AI Service') {
+            steps {
+                bat '''
+                    @echo off
+
+                    echo ========================================
+                    echo Stopping Python AI Service
+                    echo ========================================
+
+                    net stop ATMS-Python-AI 2>nul || echo Service was not running
+
+                    echo Killing remaining Python processes...
+
+                    taskkill /F /IM python.exe 2>nul || echo No python.exe found
+                    taskkill /F /IM pythonw.exe 2>nul || echo No pythonw.exe found
+
+                    ping 127.0.0.1 -n 5 > nul
+
+                    echo Python AI Service stopped successfully
+                '''
+            }
+        }
+
+
+        // STAGE 3: Download AI Artifact
+        stage('Download AI Artifact from Nexus') {
+            steps {
+
+                withCredentials([usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+
+                    bat """
+                        @echo off
+                        setlocal
+
+                        echo ========================================
+                        echo Downloading AI-Python Artifact
+                        echo ========================================
+
+                        set "ARTIFACT_DIR=%AI_DEPLOY_DIR%"
+
+                        if exist "%ARTIFACT_DIR%" (
+                            echo Cleaning existing deployment...
+
+                            for /d %%D in ("%ARTIFACT_DIR%\\*") do rmdir /S /Q "%%D"
+                            del /F /Q "%ARTIFACT_DIR%\\*.*" 2>nul
+                        ) else (
+                            mkdir "%ARTIFACT_DIR%"
+                        )
+
+                        echo Downloading artifact...
+
+                        curl.exe --fail --silent --show-error ^
+                          -u "%NEXUS_USER%:%NEXUS_PASSWORD%" ^
+                          -o "%ARTIFACT_DIR%\\${SERVICE_NAME}.zip" ^
+                          "${env.NEXUS_URL}/repository/${env.NEXUS_REPO}/${PROJECT_NAME}/windows/${params.BUILD_VERSION}/AI/${SERVICE_NAME}.zip"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download artifact
+                            exit /b 1
+                        )
+
+                        echo Extracting artifact...
+
+                        powershell -Command "Expand-Archive -Force '%ARTIFACT_DIR%\\${SERVICE_NAME}.zip' '%ARTIFACT_DIR%'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to extract artifact
+                            exit /b 1
+                        )
+
+                        del "%ARTIFACT_DIR%\\${SERVICE_NAME}.zip"
+
+                        echo Artifact extracted successfully
+                    """
+                }
+            }
+        }
+
+
+        // STAGE 4: Setup Python Environment
+        stage('Setup Python Environment') {
+            steps {
+
+                bat '''
+                    @echo off
+                    setlocal EnableDelayedExpansion
+
+                    echo ========================================
+                    echo Setting up Python Virtual Environment
+                    echo ========================================
+
+                    set PYTHON_EXE=
+
+                    for /f "tokens=*" %%i in ('where python 2^>nul') do (
+                        if "!PYTHON_EXE!"=="" (
+                            echo %%i | findstr /I "WindowsApps" >nul
+                            if errorlevel 1 set PYTHON_EXE=%%i
+                        )
+                    )
+
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Python311\\python.exe" set PYTHON_EXE=C:\\Python311\\python.exe
+                    if "!PYTHON_EXE!"=="" if exist "C:\\Python312\\python.exe" set PYTHON_EXE=C:\\Python312\\python.exe
+
+                    if "!PYTHON_EXE!"=="" (
+                        echo ERROR: Python not found
+                        exit /b 1
+                    )
+
+                    echo Found Python: !PYTHON_EXE!
+
+                    cd /d "%AI_APP_DIR%"
+
+                    if exist ai_aenv (
+                        echo Removing old virtual environment...
+                        rmdir /S /Q ai_aenv
+                    )
+
+                    echo Creating virtual environment...
+
+                    "!PYTHON_EXE!" -m venv ai_aenv
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to create venv
+                        exit /b 1
+                    )
+
+                    call ai_aenv\\Scripts\\activate
+
+                    echo Installing dependencies...
+
+                    pip install -r Letest_requirements.txt
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to install requirements
+                        exit /b 1
+                    )
+
+                    pip install "flask[async]"
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: Failed to install flask[async]
+                        exit /b 1
+                    )
+
+                    echo Environment setup completed successfully
+                '''
+            }
+        }
+
+
+        // STAGE 5: Start Python AI Service
+        stage('Start Python AI Service') {
+            steps {
+
+                bat '''
+                    @echo off
+                    setlocal enabledelayedexpansion
+                    echo Starting Python AI Service
+
+                    set SERVICE_NAME=ATMS-Python-AI
+
+                    if not exist "%AI_APP_DIR%\\logs" (
+                        mkdir "%AI_APP_DIR%\\logs"
+                    )
+
+                    sc query "%SERVICE_NAME%" >nul 2>&1
+
+                    if !ERRORLEVEL! NEQ 0 (
+
+                    echo Service does not exist.
+                    echo Creating NSSM service...
+
+                    nssm install "%SERVICE_NAME%" "%AI_APP_DIR%\\ai_aenv\\Scripts\\python.exe"
+
+                    if !ERRORLEVEL! NEQ 0 (
+                        echo ERROR: Failed to create service
+                        exit /b 1
+                        )
+                    ) else (
+                        echo Service already exists.
+                    )
+
+                    echo Updating NSSM configuration...
+
+                    nssm set "%SERVICE_NAME%" Application "%AI_APP_DIR%\\ai_aenv\\Scripts\\python.exe"
+                    nssm set "%SERVICE_NAME%" AppDirectory "%AI_APP_DIR%"
+                    nssm set "%SERVICE_NAME%" AppParameters "run.py"
+                    nssm set "%SERVICE_NAME%" AppStdout "%AI_APP_DIR%\\logs\\stdout.log"
+                    nssm set "%SERVICE_NAME%" AppStderr "%AI_APP_DIR%\\logs\\stderr.log"
+                    nssm set "%SERVICE_NAME%" AppRotateFiles 1
+                    nssm set "%SERVICE_NAME%" AppRotateBytes 10485760
+
+                    echo Restarting service...
+
+                    net stop "%SERVICE_NAME%" >nul 2>&1
+                    timeout /t 3 /nobreak >nul
+                    net start "%SERVICE_NAME%"
+
+                    if !ERRORLEVEL! NEQ 0 (
+                        echo ERROR: Failed to start service
+                        exit /b 1
+                    )
+
+                    timeout /t 8 /nobreak >nul
+                    echo Verifying service status...
+                    sc query "%SERVICE_NAME%" | findstr "RUNNING"
+
+                    if !ERRORLEVEL! NEQ 0 (
+                        echo ERROR: Service is not running
+                        exit /b 1
+                    )
+
+                    echo Python AI Service Started Successfully
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+
+            echo """
+            ====================================================
+            AI PYTHON DEPLOYMENT SUCCESSFUL
+            ====================================================
+
+            Target Machine : ${params.PROJECT_TARGET_MACHINE}
+            Build Version  : ${params.BUILD_VERSION}
+            Deploy Drive   : ${params.DEPLOY_DRIVE}
+
+            Service Status :
+            - ATMS-Python-AI : RUNNING
+
+            ====================================================
+            """
+        }
+
+        failure {
+
+            echo """
+            ====================================================
+            AI PYTHON DEPLOYMENT FAILED
+            ====================================================
+
+            Target Machine : ${params.PROJECT_TARGET_MACHINE}
+            Build Version  : ${params.BUILD_VERSION}
+
+            Check Jenkins console logs for failure details.
+
+            ====================================================
+"""
+        }
+    }
+}

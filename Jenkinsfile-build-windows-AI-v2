@@ -1,0 +1,566 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: '',
+            description: 'Target Jenkins Agent'
+        )
+
+        string(
+            name: 'PROJECT_BRANCH',
+            defaultValue: '',
+            description: 'Git Branch'
+        )
+
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Notification Emails'
+        )
+
+        choice(
+            name: 'DEPLOY_DRIVE',
+            choices: ['C', 'D', 'E', 'F'],
+            description: 'Workspace Drive'
+        )
+    }
+
+    environment {
+
+        PROJECT_NAME = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        PROJECT_ENV  = "${params.PROJECT_TARGET_MACHINE.split('-')[1]}"
+
+        SERVICE_NAME = 'AI-Python'
+
+        VERSION = '1.0.0'
+        BUILD_DATE = "${new Date().format('dd-MM-yyyy')}"
+        RELEASE_VERSION = "v${VERSION}-${BUILD_NUMBER}"
+
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        GIT_REPO_URL       = 'git@10.10.1.68:AI/AI.git'
+        GIT_CREDENTIALS_ID = 'jenkins-gitlab-118'
+
+        SERVICE_DIR = "${params.DEPLOY_DRIVE}:\\jenkins\\workspace\\QASIP Build AI-Python\\AI-Python"
+
+        ARTIFACT_BASE_DIR    = "${params.DEPLOY_DRIVE}:\\artifacts"
+        SERVICE_ARTIFACT_DIR = "${ARTIFACT_BASE_DIR}\\${SERVICE_NAME}"
+
+        ARTIFACT_NAME = "${SERVICE_NAME}-${RELEASE_VERSION}.tar.gz"
+        ARTIFACT_PATH = "${SERVICE_ARTIFACT_DIR}\\${ARTIFACT_NAME}"
+
+        NEXUS_UPLOAD_PATH = "${PROJECT_NAME}/windows/${PROJECT_ENV}/${BUILD_DATE}/${SERVICE_NAME}/${ARTIFACT_NAME}"
+
+        SKIP_SCRIPT_SETUP = "false"
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    if (!params.PROJECT_TARGET_MACHINE?.trim()) {
+                        error "PROJECT_TARGET_MACHINE is required"
+                    }
+
+                    if (!params.PROJECT_BRANCH?.trim()) {
+                        error "PROJECT_BRANCH is required"
+                    }
+
+                    if (!params.NOTIFICATION_EMAILS?.trim()) {
+                        error "NOTIFICATION_EMAILS is required"
+                    }
+                }
+            }
+        }
+
+        stage('Setup SSH Keys from Nexus') {
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                       bat '''
+                        @echo off
+                        echo Setting up SSH Keys from Nexus
+
+                        set "SSH_DIR=C:\\Windows\\System32\\config\\systemprofile\\.ssh"
+                        set "USER_SSH_DIR=%USERPROFILE%\\.ssh"
+
+                        if not exist "%SSH_DIR%" (
+                            echo Creating system .ssh directory...
+                            mkdir "%SSH_DIR%"
+                        )
+        
+                        if not exist "%USER_SSH_DIR%" (
+                            echo Creating user .ssh directory...
+                            mkdir "%USER_SSH_DIR%"
+                        )
+
+               
+                        echo Downloading SSH key files from Nexus...
+                
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $headers = @{ Authorization = 'Basic ' + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%')) }; $sshDir = 'C:\\Windows\\System32\\config\\systemprofile\\.ssh'; $token = $null; $urls = @(); do { $uri = '%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%'; if ($token) { $uri += '&continuationToken=' + $token }; $r = Invoke-RestMethod -Uri $uri -Headers $headers; foreach ($i in $r.items) { foreach ($a in $i.assets) { if ($a.downloadUrl -match 'ssh-key') { $urls += $a.downloadUrl } } }; $token = $r.continuationToken } while ($token); Write-Host ('Found ' + $urls.Count + ' SSH key file(s)'); foreach ($u in $urls) { $f = $u.Split('/')[-1]; $outPath = Join-Path $sshDir $f; Invoke-WebRequest -Uri $u -Headers $headers -OutFile $outPath; Write-Host ('Downloaded: ' + $f) }; Write-Host 'SSH keys setup complete.'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to setup SSH keys from Nexus
+                            exit /b 1
+                        )
+
+                        echo Checking if copy is required...
+                        
+                        if /I not "%SSH_DIR%"=="%USER_SSH_DIR%" (
+                            echo Copying SSH keys to user .ssh directory: %USER_SSH_DIR%
+                            xcopy /Y /Q "%SSH_DIR%\\*" "%USER_SSH_DIR%\\"
+                        
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to copy SSH keys to user .ssh directory
+                                exit /b 1
+                            )
+                        ) else (
+                            echo Source and destination are the same. Skipping copy.
+                        )
+        
+                        echo SSH key files in system .ssh (%SSH_DIR%):
+                        dir /B "%SSH_DIR%"
+                        echo SSH key files in user .ssh (%USER_SSH_DIR%):
+                        dir /B "%USER_SSH_DIR%"
+                    '''
+                }
+            }
+        }
+
+        stage('Download Common Scripts') {
+            when {
+                expression { env.SKIP_SCRIPT_SETUP == "false" }
+            }
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )
+                ]) {
+
+                        bat '''
+                        @echo off
+                        setlocal
+
+                        set "SCRIPT_DIR=%DEPLOY_DRIVE%:\\Scripts"
+
+                        echo ========================================
+                        echo Checking Existing Scripts Directory
+                        echo ========================================
+
+                        REM If Scripts directory exists and node_modules exists inside it,
+                        REM skip the entire setup process.
+                        if exist "%SCRIPT_DIR%\\node_modules" (
+                            echo node_modules already exists.
+                            echo Skipping script download and node installation.
+                            exit /b 0
+                        )
+
+                        echo ========================================
+                        echo Preparing Scripts Directory
+                        echo ========================================
+
+                        if exist "%SCRIPT_DIR%" (
+                            echo Existing folder found. Removing...
+                            rmdir /S /Q "%SCRIPT_DIR%"
+                        )
+
+                        echo Creating fresh scripts directory...
+                        mkdir "%SCRIPT_DIR%"
+
+                        echo ========================================
+                        echo Downloading Scripts from Nexus
+                        echo ========================================
+
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$headers=@{Authorization='Basic '+[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%'))};$downloadDir='%SCRIPT_DIR%';$token=$null;$urls=@();do{$uri='%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%';if($token){$uri+='&continuationToken='+$token};$r=Invoke-RestMethod -Uri $uri -Headers $headers;foreach($i in $r.items){foreach($a in $i.assets){if($a.path -match 'script' -and ($a.path -match '\\.js$' -or $a.path -match '\\.json$')){$urls+=$a.downloadUrl}}};$token=$r.continuationToken}while($token);Write-Host('Found '+$urls.Count+' file(s)');if($urls.Count -eq 0){throw 'No scripts found in repo'};foreach($u in $urls){$f=Split-Path $u -Leaf;$out=Join-Path $downloadDir $f;Write-Host('Downloading: '+$f);Invoke-WebRequest -Uri $u -Headers $headers -OutFile $out -UseBasicParsing};Write-Host 'Scripts download complete.'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download scripts
+                            exit /b 1
+                        )
+
+                        echo Downloaded files:
+                        dir /B "%SCRIPT_DIR%"
+
+                    '''
+                }
+            }
+        }
+
+      stage('Installing Node packages for Custom notification service') {
+    steps {
+        script {
+
+            def installRequired = true
+
+            if (fileExists("${env.DEPLOY_DRIVE}:\\Scripts\\node_modules")) {
+
+                def nodeVersion = bat(
+                    script: '''
+                        @echo off
+                        "C:\\Program Files\\nodejs\\node.exe" -v
+                    ''',
+                    returnStdout: true
+                ).trim()
+
+                echo "Detected Node Version: ${nodeVersion}"
+
+                if (nodeVersion.startsWith("v18.")) {
+                    installRequired = false
+                    echo "node_modules already exists and Node version is valid."
+                }
+            }
+
+            if (installRequired) {
+
+                bat """
+                    @echo off
+
+                    set "SCRIPT_DIR=${env.DEPLOY_DRIVE}:\\Scripts"
+                    set "NODE_HOME=C:\\Program Files\\nodejs"
+                    set "PATH=%NODE_HOME%;%PATH%"
+
+                    cd /d "%SCRIPT_DIR%"
+
+                    call npm install --force
+
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: npm install failed
+                        exit /b 1
+                    )
+
+                    echo NPM Install Completed Successfully
+                """
+            }
+        }
+    }
+}
+
+        stage('Checkout AI Repository') {
+            steps {
+                script {
+
+                    dir("${SERVICE_DIR}") {
+
+                        deleteDir()
+
+                        checkout([
+                            $class: 'GitSCM',
+                            branches: [[
+                                name: "refs/heads/${params.PROJECT_BRANCH}"
+                            ]],
+
+                            userRemoteConfigs: [[
+                                url: "${GIT_REPO_URL}",
+                                credentialsId: "${GIT_CREDENTIALS_ID}"
+                            ]],
+
+                            extensions: [
+                                [$class: 'CleanBeforeCheckout'],
+                                [
+                                    $class: 'CloneOption',
+                                    shallow: true,
+                                    depth: 1,
+                                    timeout: 30
+                                ]
+                            ]
+                        ])
+                    }
+                }
+            }
+        }
+
+        stage('Prepare Configs and Inject Credentials') {
+            steps {
+                bat """
+                    @echo off
+
+                    cd /d "${SERVICE_DIR}\\test_script_generator"
+
+                    if not exist ".env.example" (
+                        echo ERROR: .env.example file not found
+                        exit /b 1
+                    )
+
+                    if exist ".env" (
+                        del /F /Q ".env"
+                    )
+
+                    rename ".env.example" ".env"
+
+                    echo .env file prepared successfully.
+                """
+
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'python-db-credentials',
+                        usernameVariable: 'COUCH_USER',
+                        passwordVariable: 'COUCH_PASS'
+                    ),
+                    string(
+                        credentialsId: 'openai-api-key',
+                        variable: 'OPENAI_KEY'
+                    )
+                ]) {
+
+                    bat '''
+                        @echo off
+                        echo ========================================
+                        echo Injecting Python AI credentials into .env
+                        echo ========================================
+
+                        set "ENV_FILE=%SERVICE_DIR%\\test_script_generator\\.env"
+
+                        if not exist "%ENV_FILE%" (
+                            echo ERROR: .env file not found at %ENV_FILE%
+                            exit /b 1
+                        )
+
+                        echo Updating COUCH_DB_USER, COUCH_DB_PASSWORD, and OPENAI_API_KEY...
+
+                        powershell -Command "$content = Get-Content '%ENV_FILE%' -Raw; $content = $content -replace 'COUCH_DB_USER\\s*=\\s*\\\".*?\\\"', 'COUCH_DB_USER = \\\"%COUCH_USER%\\\"'; $content = $content -replace 'COUCH_DB_PASSWORD\\s*=\\s*\\\".*?\\\"', 'COUCH_DB_PASSWORD = \\\"%COUCH_PASS%\\\"'; $content = $content -replace 'OPENAI_API_KEY\\s*=\\s*.*', 'OPENAI_API_KEY=%OPENAI_KEY%'; Set-Content '%ENV_FILE%' $content -NoNewline;"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to update Python .env credentials
+                            exit /b 1
+                        )
+
+                        echo Python AI credentials injected successfully.
+                    '''
+                }
+   
+            }
+        }
+
+
+
+stage('Install Python Dependencies') {
+
+    steps {
+
+        script {
+
+            try {
+
+                bat """
+                @echo off
+                setlocal EnableDelayedExpansion
+
+                echo ========================================
+                echo Installing Python Dependencies
+                echo ========================================
+
+                cd /d "${SERVICE_DIR}\\test_script_generator"
+
+                python --version
+
+                set "REQUIREMENTS_FILE=Letest_requirements.txt"
+
+                if not exist "!REQUIREMENTS_FILE!" (
+                    echo ERROR: Requirements file not found
+                    exit /b 1
+                )
+
+                echo ========================================
+                echo Cleaning Requirements File
+                echo ========================================
+
+                powershell -NoProfile -ExecutionPolicy Bypass ^
+                -Command "(Get-Content '!REQUIREMENTS_FILE!') | Where-Object { \$_ -notmatch '^(Pillow|ImageHash)' } | Set-Content '!REQUIREMENTS_FILE!'"
+
+                echo Pillow==11.3.0>>"!REQUIREMENTS_FILE!"
+                echo ImageHash==4.3.1>>"!REQUIREMENTS_FILE!"
+
+                echo ========================================
+                echo Final Requirements File
+                echo ========================================
+
+                type "!REQUIREMENTS_FILE!"
+
+                python -m pip install --upgrade pip
+
+                pip install -r "!REQUIREMENTS_FILE!"
+
+                if !ERRORLEVEL! NEQ 0 (
+                    echo ERROR: Python dependency installation failed
+                    exit /b 1
+                )
+
+                echo ========================================
+                echo Python Dependencies Installed Successfully
+                echo ========================================
+                """
+
+            } catch (Exception ex) {
+
+                echo "ERROR IN INSTALL PYTHON DEPENDENCIES STAGE"
+                echo ex.toString()
+                throw ex
+            }
+        }
+    }
+}
+
+        stage('Package and Upload Artifact') {
+
+            steps {
+
+                script {
+
+                    def excludeDirs = [
+                        '.git',
+                        '__pycache__',
+                        '.pytest_cache',
+                        'Recordings',
+                        '.venv',
+                        'venv',
+                        '.idea',
+                        '.vscode'
+                    ]
+
+                    def tarExcludes = excludeDirs.collect {
+                        "--exclude=${it}"
+                    }.join(' ')
+
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: env.NEXUS_CREDENTIALS_ID,
+                            usernameVariable: 'NEXUS_USER',
+                            passwordVariable: 'NEXUS_PASSWORD'
+                        )
+                    ]) {
+
+                        bat """
+                        @echo off
+
+                        if not exist "${ARTIFACT_BASE_DIR}" (
+                            mkdir "${ARTIFACT_BASE_DIR}"
+                        )
+
+                        if not exist "${SERVICE_ARTIFACT_DIR}" (
+                            mkdir "${SERVICE_ARTIFACT_DIR}"
+                        )
+
+                        if exist "${ARTIFACT_PATH}" (
+                            del /F /Q "${ARTIFACT_PATH}"
+                        )
+
+                        cd /d "${SERVICE_DIR}"
+
+                        tar -czf "${ARTIFACT_PATH}" ${tarExcludes} .
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo Artifact creation failed
+                            exit /b 1
+                        )
+
+                        curl.exe ^
+                        -s ^
+                        -o nul ^
+                        -w "%%{http_code}" ^
+                        -u %NEXUS_USER%:%NEXUS_PASSWORD% ^
+                        --upload-file "${ARTIFACT_PATH}" ^
+                        "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}" ^
+                        > http_code.txt
+
+                        set /p HTTP_CODE=<http_code.txt
+
+                        if "%HTTP_CODE%"=="200" goto success
+                        if "%HTTP_CODE%"=="201" goto success
+                        if "%HTTP_CODE%"=="204" goto success
+
+                        echo Upload Failed
+                        exit /b 1
+
+                        :success
+                        echo Upload Successful
+                        """
+                    }
+                }
+            }
+        }
+
+    } 
+
+    post {
+
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    
+                def executionTime = currentBuild.durationString.replace(' and counting', '')
+                echo """
+                ========================================
+                BUILD SUCCESSFUL
+                ========================================
+                All components processed successfully:
+                - AI-Python Repo cloned from branch : ${params.PROJECT_BRANCH}
+                - Service Name                      : ${SERVICE_NAME}
+                - Deploy Mode                       : ${env.DEPLOY_MODE}
+                - Branch                            : ${params.PROJECT_BRANCH}
+                - Build Version                     : ${env.BUILD_VERSION}
+                - Release Version                   : ${RELEASE_VERSION}
+                - Artifact Path                     : ${ARTIFACT_PATH}
+                - Nexus Upload Path                 : ${NEXUS_UPLOAD_PATH}
+                - Nexus Base Path                   : ${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}/
+                ========================================
+                """
+                bat """
+                @echo off
+                node %DEPLOY_DRIVE%:\\Scripts\\sendBuildEmail.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="${params.NOTIFICATION_EMAILS}" --projectName="%PROJECT_NAME%" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType=%ANSIBLE_OS% --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                """
+                }
+                }
+        }
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    echo """
+                ========================================
+                BUILD FAILED
+                ========================================
+                Please check the logs above for errors.
+                ========================================
+                """
+                }
+              }
+            }
+         }
+
+}

@@ -1,0 +1,17 @@
+---
+# handlers file for tomcat
+
+- name: restart tomcat
+  win_service:
+    name: "{{ tomcat_service_name }}"
+    state: restarted
+
+- name: stop tomcat
+  win_service:
+    name: "{{ tomcat_service_name }}"
+    state: stopped
+
+- name: start tomcat
+  win_service:
+    name: "{{ tomcat_service_name }}"
+    state: started

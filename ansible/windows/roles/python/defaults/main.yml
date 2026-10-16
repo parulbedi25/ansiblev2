@@ -1,0 +1,6 @@
+---
+# defaults file for roles/python
+python_version: "3.11.4"
+python_installer: "python-{{ python_version }}-amd64.exe"
+python_url: "https://www.python.org/ftp/python/{{ python_version }}/{{ python_installer }}"
+temp_dir: "D:\\temp"

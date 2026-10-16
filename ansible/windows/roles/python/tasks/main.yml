@@ -1,0 +1,82 @@
+---
+# tasks file for roles/python
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ temp_dir }}"
+    state: directory
+
+- name: Download Python {{ python_version }} installer
+  win_get_url:
+    url: "{{ python_url }}"
+    dest: "{{ temp_dir }}\\{{ python_installer }}"
+
+- name: Install Python {{ python_version }} silently (user install, default path)
+  win_package:
+    path: "{{ temp_dir }}\\{{ python_installer }}"
+    arguments: >
+      /quiet
+      InstallAllUsers=0
+      PrependPath=1
+      Include_test=0
+    state: present
+  register: python_install_result
+
+- name: Get user profile path
+  win_shell: echo $env:USERPROFILE
+  register: user_profile
+  changed_when: false
+
+- name: Check if Python exists in user AppData
+  win_stat:
+    path: "{{ user_profile.stdout | trim }}\\AppData\\Local\\Programs\\Python\\Python311\\python.exe"
+  register: python_user_path
+
+- name: Check if Python is available in PATH
+  win_command: python --version
+  register: python_check
+  changed_when: false
+  failed_when: false
+  environment:
+    PATH: "{{ user_profile.stdout | trim }}\\AppData\\Local\\Programs\\Python\\Python311;{{ user_profile.stdout | trim }}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts;{{ ansible_env.PATH }}"
+
+- name: Display Python installation info
+  debug:
+    msg: |
+      Python installation status:
+      - Installed in user AppData: {{ python_user_path.stat.exists }}
+      - Available in PATH: {{ python_check.rc == 0 }}
+      - Python version check: {{ python_check.stdout if python_check.rc == 0 else 'Not available in PATH yet' }}
+
+- name: Fail if Python is not installed
+  fail:
+    msg: >
+      Python is not installed correctly.
+      Installation file exists: {{ python_user_path.stat.exists }}
+      Please check the installation logs.
+  when: not python_user_path.stat.exists and python_check.rc != 0
+
+- name: Add Python directory to user PATH
+  win_path:
+    elements:
+      - "{{ user_profile.stdout | trim }}\\AppData\\Local\\Programs\\Python\\Python311"
+      - "{{ user_profile.stdout | trim }}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"
+    state: present
+    scope: user
+  when: python_user_path.stat.exists
+
+- name: Verify Python is now in PATH (after environment update)
+  win_command: python --version
+  register: python_final_check
+  changed_when: false
+  failed_when: false
+  environment:
+    PATH: "{{ user_profile.stdout | trim }}\\AppData\\Local\\Programs\\Python\\Python311;{{ user_profile.stdout | trim }}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts;{{ ansible_env.PATH }}"
+
+- name: Display final Python verification
+  debug:
+    msg: |
+      Python {{ python_version }} installation completed
+      Path: {{ user_profile.stdout | trim }}\AppData\Local\Programs\Python\Python311
+      Version: {{ python_final_check.stdout | trim if python_final_check.rc == 0 else 'Unable to verify' }}
+      PATH updated: User environment variable updated with Python paths
+

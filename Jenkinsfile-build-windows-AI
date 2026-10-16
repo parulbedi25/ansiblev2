@@ -1,0 +1,557 @@
+pipeline {
+
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            defaultValue: '',
+            description: 'Jenkins project agent label where this pipeline will run (format: project-env-ip, eg: copper-dev-10.10.3.150)'
+        )
+
+        string(
+            name: 'PROJECT_BRANCH',
+            defaultValue: '',
+            description: 'Project source code branch to checkout for build/deployment eg: qasip_devops'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+
+        choice(
+        name: 'DEPLOY_DRIVE',
+        choices: ['D', 'E', 'F'],
+        description: 'Drive where repository and build artifacts will be stored'
+    )
+
+
+    }
+    environment {
+
+        // Project Configuration
+        PROJECT_NAME = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
+        SERVICE_NAME = 'AI'
+        VERSION = '1.0.0'
+        BUILD_NUMBER = "${env.BUILD_NUMBER}"
+        BUILD_DATE = "${new Date().format('dd-MM-yyyy')}"
+        RELEASE_VERSION = "${BUILD_DATE}-v${VERSION}-${BUILD_NUMBER}"
+
+        // Nexus Configuration
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        // Git Configuration
+        GIT_REPO_URL = 'git@10.10.1.68:AI/AI.git'
+        GIT_CREDENTIALS_ID = 'jenkins-gitlab-118'
+
+        // Repo Configuration
+        REPO_BASE_DIR = "${params.DEPLOY_DRIVE}:\\jenkins\\workspace\\QASIP Build AI-Python\\AI-Python"
+        SERVICE_DIR = "${REPO_BASE_DIR}"
+
+        // Artifact Configuration
+        ARTIFACT_BASE_DIR = "${params.DEPLOY_DRIVE}:\\artifacts"
+        SERVICE_ARTIFACT_DIR = "${ARTIFACT_BASE_DIR}\\${SERVICE_NAME}"
+        ARTIFACT_NAME = "${SERVICE_NAME}.zip"
+        ARTIFACT_PATH = "${SERVICE_ARTIFACT_DIR}\\${ARTIFACT_NAME}"
+
+        // Nexus Upload Path
+         NEXUS_UPLOAD_PATH = "${PROJECT_NAME}/windows/${RELEASE_VERSION}/${SERVICE_NAME}/${ARTIFACT_NAME}"
+
+    }
+    stages {
+// Stage 1: Validate Parameters
+        stage('Validate Parameters') {
+            steps {
+                script {
+
+                    env.AGENT_LABEL = params.PROJECT_TARGET_MACHINE?.trim()?.toLowerCase()
+                    env.BRANCH_NAME = params.PROJECT_BRANCH?.trim()
+                    
+
+                    def missing = []
+                    def formatErrors = []
+                    def notificationEmails = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+                    if (!env.AGENT_LABEL) missing << "PROJECT_TARGET_MACHINE"
+                    if (!env.BRANCH_NAME) missing << "PROJECT_BRANCH"
+                    if (!notificationEmails) {
+                        missing << "NOTIFICATION_EMAILS"
+                    }
+
+
+                    if (notificationEmails) {
+
+                        def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+                        def emailList = notificationEmails
+                                            .split(',')
+                                            .collect { it.trim() }
+                                            .findAll { it }
+
+                        // Check duplicates
+                        if (emailList.size() != emailList.unique().size()) {
+                            formatErrors << "Duplicate email addresses found in NOTIFICATION_EMAILS"
+                        }
+
+                        // Validate format
+                        for (email in emailList) {
+                            if (!(email ==~ emailRegex)) {
+                                formatErrors << "Invalid email format detected: ${email}"
+                            }
+                        }
+                    }
+
+                    if (missing || formatErrors) {
+                        error """
+BUILD FAILED ❌
+Missing required parameters:
+${missing.join('\n')}
+${formatErrors ? "Format Errors:\n${formatErrors.join('\n')}\n" : ""}
+
+Expected email format:
+user1@qasource.com, user2@qasource.com
+"""
+                    }
+
+                    echo "Parameters validated successfully"
+                    echo "Agent                 : ${env.AGENT_LABEL}"
+                    echo "Branch                : ${env.BRANCH_NAME}"
+                    echo "Notification Emails   : ${notificationEmails}"
+                    echo "Service Name          : ${SERVICE_NAME}"
+                    echo "Release Version       : ${RELEASE_VERSION}"
+                    echo "Repository Path       : ${SERVICE_DIR}"
+                    echo "Artifact Path         : ${ARTIFACT_PATH}"
+                }
+            }
+        }
+        
+
+// Stage 2: Setup SSH Keys
+        stage('Setup SSH Keys from Nexus') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )
+                ]) {
+
+                    bat '''
+                        @echo off
+                        echo Setting up SSH Keys from Nexus
+
+                        set "SSH_DIR=C:\\Windows\\System32\\config\\systemprofile\\.ssh"
+                        set "USER_SSH_DIR=%USERPROFILE%\\.ssh"
+
+                        if not exist "%SSH_DIR%" (
+                            echo Creating system .ssh directory...
+                            mkdir "%SSH_DIR%"
+                        )
+        
+                        if not exist "%USER_SSH_DIR%" (
+                            echo Creating user .ssh directory...
+                            mkdir "%USER_SSH_DIR%"
+                        )
+
+               
+                        echo Downloading SSH key files from Nexus...
+                
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $headers = @{ Authorization = 'Basic ' + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%')) }; $sshDir = 'C:\\Windows\\System32\\config\\systemprofile\\.ssh'; $token = $null; $urls = @(); do { $uri = '%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%'; if ($token) { $uri += '&continuationToken=' + $token }; $r = Invoke-RestMethod -Uri $uri -Headers $headers; foreach ($i in $r.items) { foreach ($a in $i.assets) { if ($a.downloadUrl -match 'ssh-key') { $urls += $a.downloadUrl } } }; $token = $r.continuationToken } while ($token); Write-Host ('Found ' + $urls.Count + ' SSH key file(s)'); foreach ($u in $urls) { $f = $u.Split('/')[-1]; $outPath = Join-Path $sshDir $f; Invoke-WebRequest -Uri $u -Headers $headers -OutFile $outPath; Write-Host ('Downloaded: ' + $f) }; Write-Host 'SSH keys setup complete.'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to setup SSH keys from Nexus
+                            exit /b 1
+                        )
+
+                        echo Checking if copy is required...
+                        
+                        if /I not "%SSH_DIR%"=="%USER_SSH_DIR%" (
+                            echo Copying SSH keys to user .ssh directory: %USER_SSH_DIR%
+                            xcopy /Y /Q "%SSH_DIR%\\*" "%USER_SSH_DIR%\\"
+                        
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to copy SSH keys to user .ssh directory
+                                exit /b 1
+                            )
+                        ) else (
+                            echo Source and destination are the same. Skipping copy.
+                        )
+        
+                        echo SSH key files in system .ssh (%SSH_DIR%):
+                        dir /B "%SSH_DIR%"
+                        echo SSH key files in user .ssh (%USER_SSH_DIR%):
+                        dir /B "%USER_SSH_DIR%"
+
+                    '''
+                    
+                }
+            }
+        }
+        
+        
+// Stage 3: Download Common Scripts
+        stage('Download Common Scripts from Nexus') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                    credentialsId: env.NEXUS_CREDENTIALS_ID,
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )
+                ]) {
+                    bat '''
+                        @echo off
+                        echo Preparing Scripts Directory
+
+                        set "SCRIPT_DIR=C:\\Scripts"
+
+                        if exist "%SCRIPT_DIR%" (
+                            echo Existing folder found. Removing...
+                            rmdir /S /Q "%SCRIPT_DIR%"
+                        )
+
+                        echo Creating fresh scripts directory...
+                        mkdir "%SCRIPT_DIR%"
+
+                        echo Downloading scripts from Nexus...
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop';$headers=@{Authorization='Basic '+[Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('%NEXUS_USER%:%NEXUS_PASSWORD%'))};$downloadDir='%SCRIPT_DIR%';$token=$null;$urls=@();do{$uri='%NEXUS_URL%/service/rest/v1/components?repository=%NEXUS_REPO%';if($token){$uri+='&continuationToken='+$token};$r=Invoke-RestMethod -Uri $uri -Headers $headers;foreach($i in $r.items){foreach($a in $i.assets){if($a.path -match 'script' -and ($a.path -match '\\.js$' -or $a.path -match '\\.json$')){$urls+=$a.downloadUrl}}};$token=$r.continuationToken}while($token);Write-Host('Found '+$urls.Count+' file(s)');if($urls.Count -eq 0){throw 'No scripts found in repo'};foreach($u in $urls){$f=Split-Path $u -Leaf;$out=Join-Path $downloadDir $f;Write-Host('Downloading: '+$f);Invoke-WebRequest -Uri $u -Headers $headers -OutFile $out -UseBasicParsing};Write-Host 'Scripts download complete.'"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to download scripts
+                            exit /b 1
+                        )
+
+                        echo Downloaded files:
+                        dir /B "%SCRIPT_DIR%"
+                    '''
+                }
+            }
+        }
+
+// Stage 4: Installing Node packages for Custom notification service
+        stage('Installing Node packages for Custom notification service') {
+            steps {
+                script {
+                    bat """
+                        @echo off
+
+                        set "SCRIPT_DIR=C:\\Scripts"
+                        set "NODE_HOME=C:\\Program Files\\nodejs"
+                        set "PATH=%NODE_HOME%;%PATH%"
+
+                        echo Node Version:
+                        node -v
+                        echo NPM Version:
+                        npm -v
+
+                        if not exist "%SCRIPT_DIR%\\package.json" (
+                            echo ERROR: package.json not found in %SCRIPT_DIR%
+                            exit /b 1
+                        )
+
+                        cd /d "%SCRIPT_DIR%"
+                        call npm install --force
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: npm install failed
+                            exit /b 1
+                        )
+
+                        echo NPM Install Completed Successfully
+                    """
+                }
+            }
+        }
+
+// Stage 5: Checkout AI Repository
+        stage('Checkout AI Repository') {
+
+            steps {
+
+                script {
+                    echo "PROJECT_BRANCH = '${params.PROJECT_BRANCH}'"
+
+                    // Generate release version
+                    env.BUILD_DATE = new Date().format('dd-MM-yyyy')
+                    env.RELEASE_VERSION = "${env.BUILD_DATE}-v${VERSION}-${env.BUILD_NUMBER}"
+
+                    echo """
+                    =========================================
+                    Repository Checkout Started
+                    =========================================
+                    Repository      : AI-Python
+                    Branch          : ${params.PROJECT_BRANCH}
+                    Release Version : ${env.RELEASE_VERSION}
+                    =========================================
+                    """
+
+                    // Repository details
+                    def repoName = 'AI-Python'
+                    def repoUrl  = "${GIT_REPO_URL}"
+
+                    dir("${repoName}") {
+                        deleteDir()
+            
+                        checkout([
+                            $class: 'GitSCM',
+                            branches: [[
+                                name: "refs/heads/${params.PROJECT_BRANCH}"
+                            ]],
+
+                            userRemoteConfigs: [[
+                                url: repoUrl,
+                                credentialsId: "${GIT_CREDENTIALS_ID}"
+                            ]],
+
+                            extensions: [
+
+                                [$class: 'CleanBeforeCheckout'],
+
+                                [
+                                    $class: 'CloneOption',
+                                    shallow: true,
+                                    depth: 1,
+                                    timeout: 30
+                                ]
+                            ]
+                        ])
+                        bat """
+                            @echo off
+
+                            echo ========================================
+                            echo Checkout Successful
+                            echo ========================================
+
+                            echo Repository : ${repoName}
+                            echo Branch     : ${params.PROJECT_BRANCH}
+
+                            git status
+                            git branch
+                            git log -1 --oneline
+                        """
+                    }
+
+                    echo """
+                    =========================================
+                    Repository Checkout Completed Successfully
+                    =========================================
+                    """
+                }
+            }
+        }
+
+
+// Stage 6: Prepare .env and Inject Credentials
+        stage('Prepare Configs and Inject Credentials') {
+            steps {
+                bat """
+                    @echo off
+
+                    cd /d "${SERVICE_DIR}\\test_script_generator"
+
+                    if not exist ".env.example" (
+                        echo ERROR: .env.example file not found
+                        exit /b 1
+                    )
+
+                    if exist ".env" (
+                        del /F /Q ".env"
+                    )
+
+                    rename ".env.example" ".env"
+
+                    echo .env file prepared successfully.
+                """
+
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'python-db-credentials',
+                        usernameVariable: 'COUCH_USER',
+                        passwordVariable: 'COUCH_PASS'
+                    ),
+                    string(
+                        credentialsId: 'openai-api-key',
+                        variable: 'OPENAI_KEY'
+                    )
+                ]) {
+
+                    bat '''
+                        @echo off
+                        echo ========================================
+                        echo Injecting Python AI credentials into .env
+                        echo ========================================
+
+                        set "ENV_FILE=%SERVICE_DIR%\\test_script_generator\\.env"
+
+                        if not exist "%ENV_FILE%" (
+                            echo ERROR: .env file not found at %ENV_FILE%
+                            exit /b 1
+                        )
+
+                        echo Updating COUCH_DB_USER, COUCH_DB_PASSWORD, and OPENAI_API_KEY...
+
+                        powershell -Command "$content = Get-Content '%ENV_FILE%' -Raw; $content = $content -replace 'COUCH_DB_USER\\s*=\\s*\\\".*?\\\"', 'COUCH_DB_USER = \\\"%COUCH_USER%\\\"'; $content = $content -replace 'COUCH_DB_PASSWORD\\s*=\\s*\\\".*?\\\"', 'COUCH_DB_PASSWORD = \\\"%COUCH_PASS%\\\"'; $content = $content -replace 'OPENAI_API_KEY\\s*=\\s*.*', 'OPENAI_API_KEY=%OPENAI_KEY%'; Set-Content '%ENV_FILE%' $content -NoNewline;"
+
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo ERROR: Failed to update Python .env credentials
+                            exit /b 1
+                        )
+
+                        echo Python AI credentials injected successfully.
+                    '''
+                }
+   
+            }
+        }
+
+// Stage 7: Package and Upload Artifact
+
+        stage('Upload Source Code to Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+
+                        bat """
+                            @echo off
+
+                            echo ========================================
+                            echo Creating Artifact
+                            echo ========================================
+
+
+                            if not exist "${ARTIFACT_BASE_DIR}" (
+                                mkdir "${ARTIFACT_BASE_DIR}"
+                            )
+
+                            if not exist "${SERVICE_ARTIFACT_DIR}" (
+                                mkdir "${SERVICE_ARTIFACT_DIR}"
+                            )
+
+                            if exist "${ARTIFACT_PATH}" (
+                                del /F /Q "${ARTIFACT_PATH}"
+                            )
+
+                            set TEMP_ARTIFACT_DIR=%WORKSPACE%\\temp_artifact
+                            
+                            if exist "%TEMP_ARTIFACT_DIR%" (
+                                rmdir /S /Q "%TEMP_ARTIFACT_DIR%"
+                            )
+
+                            mkdir "%TEMP_ARTIFACT_DIR%"
+                            robocopy "${SERVICE_DIR}" "%TEMP_ARTIFACT_DIR%" /E /XD ".git" "Recordings" "__pycache__" ".pytest_cache"
+
+
+
+                            powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::CreateFromDirectory( '%TEMP_ARTIFACT_DIR%', '${ARTIFACT_PATH}')"
+
+                            if %ERRORLEVEL% NEQ 0 (
+                                echo ERROR: Failed to create artifact
+                                exit /b 1
+                            )
+
+                            echo Artifact created successfully:
+                            echo ${ARTIFACT_PATH}
+
+                            echo ========================================
+                            echo Uploading Artifact to Nexus
+                            echo ========================================
+
+                            curl.exe -s -o nul -w "%%{http_code}" -u %NEXUS_USER%:%NEXUS_PASSWORD% --upload-file "${ARTIFACT_PATH}" "${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}" > http_code.txt
+                            set /p HTTP_CODE=<http_code.txt
+
+                            del http_code.txt
+
+                            echo HTTP Response Code: %HTTP_CODE%
+
+                            if "%HTTP_CODE%"=="201" (
+
+                                echo Upload successful.
+
+                            ) else (
+
+                                echo ERROR: Upload failed.
+                                exit /b 1
+                            )
+                        """
+         
+                    }
+                }
+            }
+        }
+
+
+    }
+
+    post {
+
+
+
+
+
+
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    
+                def executionTime = currentBuild.durationString.replace(' and counting', '')
+                echo """
+                ========================================
+                BUILD SUCCESSFUL
+                ========================================
+                All components processed successfully:
+                - AI-Python Repo cloned from branch: ${params.PROJECT_BRANCH}
+                - Service Name: ${SERVICE_NAME}
+                - Branch: ${params.PROJECT_BRANCH}
+                - Release Version: ${RELEASE_VERSION}
+                - Artifact Path: ${ARTIFACT_PATH}
+                - Nexus Upload Path: ${NEXUS_UPLOAD_PATH}
+                - Nexus Base Path: ${NEXUS_URL}/repository/${NEXUS_REPO}/${NEXUS_UPLOAD_PATH}/
+                ========================================
+                """
+                bat """
+                @echo off
+                node C:\\Scripts\\sendBuildEmail.js --smtpServer=%SMTP_SERVER% --smtpUser=%SMTP_USER% --smtpPassword=%SMTP_PASSWORD% --smtpPort=%SMTP_PORT% --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="${params.NOTIFICATION_EMAILS}" --projectName="%PROJECT_NAME%" --branch="${params.PROJECT_BRANCH}" --buildNumber="${RELEASE_VERSION}" --osType=%ANSIBLE_OS% --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                """
+                }
+                }
+        }
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    echo """
+                ========================================
+                BUILD FAILED
+                ========================================
+                Please check the logs above for errors.
+                ========================================
+                """
+                }
+              }
+            }
+            }
+   }

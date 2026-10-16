@@ -1,0 +1,77 @@
+---
+# tasks file for node-service
+- name: Ensure Node.js application directory exists
+  win_file:
+    path: "{{ node_app_dir }}"
+    state: directory
+
+- name: Ensure Node.js log directory exists
+  win_file:
+    path: "{{ node_log_dir }}"
+    state: directory
+
+- name: Check if service already exists
+  win_service:
+    name: "{{ service_name }}"
+  register: service_check
+  failed_when: false
+
+- name: Stop existing service if running
+  win_service:
+    name: "{{ service_name }}"
+    state: stopped
+  when: service_check.exists
+  failed_when: false
+
+- name: Remove existing service if exists
+  win_command: nssm remove "{{ service_name }}" confirm
+  when: service_check.exists
+  failed_when: false
+
+- name: Install Node.js service using NSSM
+  win_command: >
+    nssm install "{{ service_name }}"
+    "{{ node_executable }}"
+    "{{ node_script_path }}"
+  args:
+    creates: false
+
+- name: Set service display name
+  win_command: nssm set "{{ service_name }}" DisplayName "{{ service_display_name }}"
+
+- name: Set service description
+  win_command: nssm set "{{ service_name }}" Description "{{ service_description }}"
+
+- name: Set service working directory
+  win_command: nssm set "{{ service_name }}" AppDirectory "{{ node_app_dir }}"
+
+- name: Set service stdout log
+  win_command: nssm set "{{ service_name }}" AppStdout "{{ node_log_dir }}\\stdout.log"
+
+- name: Set service stderr log
+  win_command: nssm set "{{ service_name }}" AppStderr "{{ node_log_dir }}\\stderr.log"
+
+- name: Set log rotation
+  win_command: nssm set "{{ service_name }}" AppRotateFiles 1
+
+- name: Set log rotation size (10 MB)
+  win_command: nssm set "{{ service_name }}" AppRotateBytes 10485760
+
+- name: Set service startup type to automatic
+  win_command: nssm set "{{ service_name }}" Start SERVICE_AUTO_START
+
+- name: Configure service restart on failure
+  win_command: nssm set "{{ service_name }}" AppExit Default Restart
+
+- name: Set restart delay (10 seconds)
+  win_command: nssm set "{{ service_name }}" AppRestartDelay "{{ service_restart_delay }}"
+
+- name: Configure service startup type (auto but don't start yet)
+  win_service:
+    name: "{{ service_name }}"
+    start_mode: auto
+    state: stopped
+
+- name: Display service creation status
+  debug:
+    msg: "{{ service_name }} created successfully (stopped). Will be started by Jenkins deployment."

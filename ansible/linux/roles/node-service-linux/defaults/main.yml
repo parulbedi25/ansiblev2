@@ -1,0 +1,16 @@
+---
+# defaults file for node-service-linux
+service_name: "atms-node-microservice"
+service_display_name: "ATMS Node.js Microservice"
+service_description: "ATMS Node.js Backend Microservice"
+
+# Node.js application paths
+node_app_dir: "/opt/deploy/atms_node_microservices"
+node_executable: "/usr/local/nvm/versions/node/v10.15.1/bin/node"
+node_script_path: "{{ node_app_dir }}/app.js"
+node_log_dir: "{{ node_app_dir }}/logs"
+
+# Service configuration
+service_startup: "auto"
+service_restart_delay: 10  # seconds
+service_restart_attempts: 3

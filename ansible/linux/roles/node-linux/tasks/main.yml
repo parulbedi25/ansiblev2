@@ -1,0 +1,99 @@
+---
+# tasks file for roles/node-linux
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Install curl if not present
+  apt:
+    name: curl
+    state: present
+
+- name: Create NVM directory
+  file:
+    path: /usr/local/nvm
+    state: directory
+    mode: '0755'
+
+- name: Install NVM system-wide
+  shell: |
+    mkdir -p /usr/local/nvm
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/{{ nvm_version }}/install.sh | NVM_DIR=/usr/local/nvm bash
+  args:
+    creates: "/usr/local/nvm/nvm.sh"
+    executable: /bin/bash
+
+- name: Add NVM to system profile
+  lineinfile:
+    path: /etc/profile.d/nvm.sh
+    line: |
+      export NVM_DIR="/usr/local/nvm"
+      [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    create: yes
+    mode: '0644'
+
+- name: Source NVM in current session
+  shell: |
+    export NVM_DIR="/usr/local/nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  args:
+    executable: /bin/bash
+
+- name: Install Node.js {{ node_version }}
+  shell: |
+    export NVM_DIR="/usr/local/nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm install {{ node_version }}
+  args:
+    executable: /bin/bash
+
+- name: Set Node.js {{ node_version }} as default
+  shell: |
+    export NVM_DIR="/usr/local/nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm use {{ node_version }}
+    nvm alias default {{ node_version }}
+  args:
+    executable: /bin/bash
+
+- name: Add Node.js bin to system PATH
+  shell: |
+    if grep -q "^PATH=" /etc/environment; then
+      sed -i 's|^PATH="\(.*\)"|PATH="/usr/local/nvm/versions/node/{{ node_version }}/bin:\1"|g' /etc/environment
+      sed -i 's|^PATH=\(.*\)|PATH=/usr/local/nvm/versions/node/{{ node_version }}/bin:\1|g' /etc/environment
+    else
+      echo 'PATH="/usr/local/nvm/versions/node/{{ node_version }}/bin:$PATH"' >> /etc/environment
+    fi
+  args:
+    executable: /bin/bash
+
+- name: Verify Node.js installation
+  shell: |
+    export NVM_DIR="/usr/local/nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm use {{ node_version }}
+    node -v
+  args:
+    executable: /bin/bash
+  register: node_version_check
+  changed_when: false
+  failed_when: false
+
+- debug:
+    msg: "Node.js version: {{ node_version_check.stdout }}"
+
+- name: Verify npm installation
+  shell: |
+    export NVM_DIR="/usr/local/nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm use {{ node_version }}
+    npm -v
+  args:
+    executable: /bin/bash
+  register: npm_version_check
+  changed_when: false
+  failed_when: false
+
+- debug:
+    msg: "npm version: {{ npm_version_check.stdout }}"
