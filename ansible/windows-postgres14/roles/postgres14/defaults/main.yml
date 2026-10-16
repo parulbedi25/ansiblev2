@@ -1,0 +1,120 @@
+---
+# =============================================================================
+# postgres14 role - defaults
+#
+# Everything is prefixed `pg14_` on purpose: these variables can never shadow
+# the legacy role's `pg_*` variables (ansible/windows/roles/postgres, PG 10),
+# so both instances can be described in the same inventory if ever needed.
+#
+# Layout produced by this role (for the default version 14.24-4):
+#   install dir : D:\QASIP\Apps\postgres14
+#   data dir    : D:\QASIP\Data\postgres14
+#   service     : postgresql-x64-14
+#   port        : 5433
+# The legacy PG 10 instance keeps D:\QASIP\Apps\postgres, D:\QASIP\Data\postgres,
+# service postgresql-x64-10 and port 5432. Nothing here touches it.
+# =============================================================================
+
+# --- PostgreSQL itself -------------------------------------------------------
+# "<version>-<EDB build>". 14.24-4 is the last 14.x build published by EDB.
+# NOTE: PostgreSQL 14 reaches end-of-life on 2026-11-12. Because every path /
+# service name below is derived from the major version, moving to e.g. 16.15-5
+# or 17.9-2 later is a one-line change (plus pg14_port if it must stay 5433).
+pg14_version: "14.24-4"
+pg14_major_version: "{{ pg14_version.split('.')[0] }}"
+pg14_min_supported_major: 14
+
+# Instance naming (drives install dir, data dir, service name, wrappers).
+pg14_instance_name: "postgres{{ pg14_major_version }}"
+pg14_install_dir: 'D:\QASIP\Apps\{{ pg14_instance_name }}'
+pg14_data_dir: 'D:\QASIP\Data\{{ pg14_instance_name }}'
+pg14_service_name: "postgresql-x64-{{ pg14_major_version }}"
+pg14_port: "5433"
+pg14_temp_dir: 'D:\temp'
+
+# EDB unattended-installer options.
+# pgAdmin is deliberately NOT installed for this instance: the PG 10 install
+# already ships one and both would share %APPDATA%\pgAdmin. Connect the existing
+# pgAdmin to localhost:5433 instead.
+pg14_installer_components: "server,commandlinetools"
+pg14_install_runtimes: true
+pg14_locale: ""                # empty = installer/OS default locale
+
+# --- Superuser / databases / roles ------------------------------------------
+# pg14_superuser_password is expected from this tree's secrets.yml (or from
+# Jenkins extra-vars), never hard-code a real one here.
+pg14_superuser: "postgres"
+pg14_superuser_password: ""
+# Re-assert the superuser password after install so it always matches the
+# supplied secret, even on a host where the service already existed.
+pg14_manage_superuser_password: true
+
+pg14_databases:
+  - atms_master
+pg14_roles:
+  - admin
+  - developer
+  - app
+  - report
+
+# --- Server configuration ----------------------------------------------------
+pg14_listen_addresses: "*"
+# scram-sha-256 is the PG 14 default. Only drop to md5 if a very old client
+# driver cannot do SCRAM, and change pg_hba (pg14_hba_entries) to match.
+pg14_auth_method: "scram-sha-256"
+pg14_password_encryption: "{{ pg14_auth_method }}"
+pg14_hba_entries:
+  - "host all all 127.0.0.1/32 {{ pg14_auth_method }}"
+  - "host all all ::1/128 {{ pg14_auth_method }}"
+  - "host all all 0.0.0.0/0 {{ pg14_auth_method }}"
+  - "host all all ::/0 {{ pg14_auth_method }}"
+# Extra postgresql.conf settings, e.g. [{key: shared_buffers, value: "512MB"}]
+pg14_extra_settings: []
+
+# --- pgvector ----------------------------------------------------------------
+pg14_pgvector_enabled: true
+pg14_pgvector_version: "0.8.7"          # pgvector tag, without the leading "v"
+# How to get the pgvector binaries onto the host:
+#   build    - official route: clone the pinned tag and compile with
+#              `nmake /F Makefile.win` against pg14_install_dir (PGROOT).
+#              Requires Visual Studio C++ Build Tools on the target host
+#              (the role checks and stops with instructions if missing).
+#   prebuilt - download a ZIP you built/pinned yourself (pg14_pgvector_prebuilt_url)
+#              that contains lib\vector.dll and share\extension\vector*...
+#   none     - do not install binaries, only run CREATE EXTENSION (fails if absent)
+pg14_pgvector_install_method: "build"
+pg14_pgvector_git_url: "https://github.com/pgvector/pgvector.git"
+pg14_pgvector_prebuilt_url: ""
+# Full path to vcvars64.bat. Empty = auto-detect with vswhere.exe.
+pg14_pgvector_vcvars_path: ""
+# Databases that get `CREATE EXTENSION vector`. Defaults to pg14_databases.
+pg14_pgvector_databases: "{{ pg14_databases }}"
+
+# --- Firewall / PATH / wrappers ---------------------------------------------
+pg14_open_firewall: true
+pg14_firewall_rule_name: "{{ pg14_instance_name }}-tcp-{{ pg14_port }}"
+pg14_firewall_profiles: [Domain, Private, Public]
+
+# Do NOT put this instance's bin\ on the machine PATH: `psql`, `pg_dumpall`, ...
+# would become ambiguous with the PG 10 tools (Jenkinsfile-db-backup-windows
+# pins the PG 10 bin dir, other scripts do not). Version-suffixed wrappers are
+# provided instead (psql14, pg_dump14, pg_dumpall14, pg_restore14,
+# postgres14-status) and only their directory is added to PATH.
+pg14_add_bin_to_system_path: false
+pg14_create_cli_wrappers: true
+pg14_cli_wrapper_dir: 'C:\ProgramData\{{ pg14_instance_name }}'
+pg14_add_wrapper_dir_to_system_path: true
+
+# --- Safety ------------------------------------------------------------------
+# Before changing anything, snapshot the legacy instance; afterwards re-check it
+# and report both instances side by side.
+pg14_verify_existing_pg10: true
+pg14_min_free_disk_gb: 2
+pg14_no_log: false              # set true to hide the superuser password in logs
+
+# Read-only description of the legacy install. Used ONLY by the collision
+# guards and the before/after health check - this role never writes to these.
+pg10_install_dir: 'D:\QASIP\Apps\postgres'
+pg10_data_dir: 'D:\QASIP\Data\postgres'
+pg10_service_name: "postgresql-x64-10"
+pg10_port: "5432"

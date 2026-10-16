@@ -1,0 +1,15 @@
+---
+# Handlers are scoped to the PG 14 service only (pg14_service_name).
+# The legacy postgresql-x64-10 service is never restarted by this role.
+
+- name: Restart postgres14
+  ansible.windows.win_service:
+    name: "{{ pg14_service_name }}"
+    state: restarted
+    start_mode: auto
+
+- name: Ensure postgres14 is running
+  ansible.windows.win_service:
+    name: "{{ pg14_service_name }}"
+    state: started
+    start_mode: auto

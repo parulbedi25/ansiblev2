@@ -1,0 +1,561 @@
+---
+# =============================================================================
+# postgres14 - install a SECOND PostgreSQL instance (14.x, port 5433, pgvector)
+# next to the existing PostgreSQL 10 instance (port 5432).
+#
+# Safety rules this file lives by:
+#   * every path/service/port is pg14_* and is asserted to differ from PG 10
+#   * binaries are always called by absolute path - nothing is resolved by
+#     searching the disk or by relying on PATH (two installs make that unsafe)
+#   * PG 10's bin dir is never added to / removed from PATH, its service is
+#     never restarted, and its data dir is never written to
+#   * idempotent: re-running changes nothing once the instance is healthy
+# =============================================================================
+
+# --------------------------------------------------------------------------
+# 1. Preflight - refuse to run if anything would collide with PostgreSQL 10
+# --------------------------------------------------------------------------
+- name: Preflight | Validate inputs and rule out any collision with PostgreSQL 10
+  ansible.builtin.assert:
+    that:
+      - pg14_version | length > 0
+      - pg14_major_version | int >= pg14_min_supported_major | int
+      - pg14_superuser_password | length > 0
+      - (pg14_port | int) != (pg10_port | int)
+      - (pg14_install_dir | lower) != (pg10_install_dir | lower)
+      - (pg14_data_dir | lower) != (pg10_data_dir | lower)
+      - (pg14_data_dir | lower) != (pg14_install_dir | lower)
+      - pg14_service_name | lower != pg10_service_name | lower
+    fail_msg: >-
+      Refusing to continue: the pg14_* settings collide with the existing
+      PostgreSQL 10 instance (port {{ pg10_port }}, {{ pg10_install_dir }},
+      {{ pg10_data_dir }}, service {{ pg10_service_name }}) or
+      pg14_superuser_password is empty. Check defaults/main.yml / secrets.yml.
+    success_msg: >-
+      PostgreSQL {{ pg14_version }} will be installed as service
+      {{ pg14_service_name }} in {{ pg14_install_dir }} (data
+      {{ pg14_data_dir }}) on port {{ pg14_port }}.
+
+- name: Preflight | Check whether the PostgreSQL 14 service already exists
+  ansible.windows.win_service:
+    name: "{{ pg14_service_name }}"
+  register: pg14_service_check
+  failed_when: false
+  changed_when: false
+
+- name: Preflight | Check who is listening on port {{ pg14_port }}
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $c = Get-NetTCPConnection -LocalPort {{ pg14_port }} -State Listen |
+         Select-Object -First 1
+    if ($c) {
+      $p = Get-Process -Id $c.OwningProcess
+      "LISTENING $($p.ProcessName) $($c.OwningProcess)"
+    } else { "FREE" }
+  register: pg14_port_check
+  changed_when: false
+  failed_when: false
+
+- name: Preflight | Fail if port {{ pg14_port }} is held by another program
+  ansible.builtin.assert:
+    that:
+      - >-
+        pg14_port_check.stdout is search('FREE') or
+        (pg14_service_check.exists | default(false) and
+         pg14_port_check.stdout is search('postgres'))
+    fail_msg: >-
+      Port {{ pg14_port }} is already in use ({{ pg14_port_check.stdout | trim }})
+      and it is not this PostgreSQL {{ pg14_major_version }} instance.
+      Pick another pg14_port - do not stop the other program.
+
+- name: Preflight | Check free disk space
+  ansible.windows.win_shell: |
+    $d = Get-PSDrive -Name '{{ pg14_install_dir.split(':')[0] }}'
+    [math]::Round($d.Free / 1GB, 1)
+  register: pg14_free_disk
+  changed_when: false
+
+- name: Preflight | Require enough free disk space
+  ansible.builtin.assert:
+    that:
+      - pg14_free_disk.stdout | trim | float >= pg14_min_free_disk_gb | float
+    fail_msg: >-
+      Only {{ pg14_free_disk.stdout | trim }} GB free on
+      {{ pg14_install_dir.split(':')[0] }}: - PostgreSQL
+      {{ pg14_version }} plus pgvector needs at least
+      {{ pg14_min_free_disk_gb }} GB.
+
+# Snapshot the legacy instance so we can prove afterwards that we left it alone.
+- name: Preflight | Snapshot the existing PostgreSQL 10 instance
+  when: pg14_verify_existing_pg10 | bool
+  block:
+    - name: Preflight | PostgreSQL 10 service state (before)
+      ansible.windows.win_service:
+        name: "{{ pg10_service_name }}"
+      register: pg10_service_before
+      failed_when: false
+      changed_when: false
+
+    - name: Preflight | PostgreSQL 10 port {{ pg10_port }} listening (before)
+      ansible.windows.win_shell: |
+        if (Get-NetTCPConnection -LocalPort {{ pg10_port }} -State Listen -ErrorAction SilentlyContinue) {
+          "LISTENING"
+        } else { "NOT-LISTENING" }
+      register: pg10_port_before
+      changed_when: false
+      failed_when: false
+
+# --------------------------------------------------------------------------
+# 2. Install PostgreSQL {{ pg14_version }}
+# --------------------------------------------------------------------------
+- name: Install | Decide whether the EDB installer has to run
+  ansible.builtin.set_fact:
+    pg14_install_needed: >-
+      {{ not (pg14_service_check.exists | default(false)) }}
+
+- name: Install | Ensure the download directory exists
+  ansible.windows.win_file:
+    path: "{{ pg14_temp_dir }}"
+    state: directory
+
+- name: Install | Download the PostgreSQL {{ pg14_version }} installer
+  ansible.windows.win_get_url:
+    url: "{{ pg14_url }}"
+    dest: "{{ pg14_installer_path }}"
+    force: false        # ~350 MB - never re-download an existing file
+  when: pg14_install_needed | bool
+
+- name: Install | Run the EDB unattended installer (new instance, port {{ pg14_port }})
+  ansible.windows.win_package:
+    path: "{{ pg14_installer_path }}"
+    creates_service: "{{ pg14_service_name }}"
+    state: present
+    arguments: >-
+      --mode unattended
+      --unattendedmodeui none
+      --superaccount {{ pg14_superuser }}
+      --superpassword {{ pg14_superuser_password }}
+      --serverport {{ pg14_port }}
+      --servicename {{ pg14_service_name }}
+      --prefix "{{ pg14_install_dir }}"
+      --datadir "{{ pg14_data_dir }}"
+      --enable-components {{ pg14_installer_components }}
+      --install_runtimes {{ 1 if (pg14_install_runtimes | bool) else 0 }}
+      {{ ('--locale ' ~ pg14_locale) if pg14_locale | length > 0 else '' }}
+  when: pg14_install_needed | bool
+  no_log: "{{ pg14_no_log | bool }}"
+
+- name: Install | Ensure the PostgreSQL {{ pg14_major_version }} service is running and automatic
+  ansible.windows.win_service:
+    name: "{{ pg14_service_name }}"
+    state: started
+    start_mode: auto
+
+- name: Install | Apply any pending restart before configuring
+  ansible.builtin.meta: flush_handlers
+
+# --------------------------------------------------------------------------
+# 3. Prove we are talking to the new instance, not to PostgreSQL 10
+# --------------------------------------------------------------------------
+- name: Verify | Read the data directory version marker
+  ansible.windows.win_shell: (Get-Content -Raw '{{ pg14_pg_version_file }}').Trim()
+  register: pg14_pg_version_on_disk
+  changed_when: false
+
+- name: Verify | Check psql exists and the data dir really is PostgreSQL {{ pg14_major_version }}
+  ansible.builtin.assert:
+    that:
+      - pg14_pg_version_on_disk.stdout | trim == pg14_major_version
+    fail_msg: >-
+      {{ pg14_pg_version_file }} contains
+      '{{ pg14_pg_version_on_disk.stdout | trim }}', expected
+      '{{ pg14_major_version }}'. Stopping rather than risk touching the wrong
+      data directory.
+    success_msg: "Data directory {{ pg14_data_dir }} is PostgreSQL {{ pg14_major_version }}."
+
+- name: Verify | Ask the server who it is (version, port, data directory)
+  ansible.windows.win_shell: |
+    & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d postgres -tAc `
+      "SELECT current_setting('server_version'), current_setting('port'), current_setting('data_directory')"
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  register: pg14_identity
+  changed_when: false
+  no_log: "{{ pg14_no_log | bool }}"
+
+- name: Verify | The answering server must be this instance
+  ansible.builtin.assert:
+    that:
+      - pg14_identity.stdout is search('(^|[|\\s])' ~ pg14_major_version ~ '\\.')
+      - pg14_identity.stdout is search('\\|\\s*' ~ pg14_port ~ '\\s*\\|')
+      - (pg14_identity.stdout | lower) is search(pg14_data_dir | lower | regex_escape)
+    fail_msg: >-
+      psql on port {{ pg14_port }} answered with '{{ pg14_identity.stdout | trim }}',
+      which is not the PostgreSQL {{ pg14_major_version }} instance in
+      {{ pg14_data_dir }}. Nothing further will be changed.
+    success_msg: "Connected to {{ pg14_identity.stdout | trim }}"
+
+# --------------------------------------------------------------------------
+# 4. postgresql.conf / pg_hba.conf (this instance's files only)
+# --------------------------------------------------------------------------
+- name: Configure | Set listen_addresses, port and password_encryption
+  community.windows.win_lineinfile:
+    path: "{{ pg14_postgresql_conf }}"
+    regex: '^\s*#?\s*{{ item.key }}\s*='
+    line: "{{ item.key }} = {{ item.value }}"
+    backup: true
+  loop:
+    - { key: listen_addresses, value: "'{{ pg14_listen_addresses }}'" }
+    - { key: port, value: "{{ pg14_port }}" }
+    - { key: password_encryption, value: "'{{ pg14_password_encryption }}'" }
+  loop_control:
+    label: "{{ item.key }}"
+  notify: Restart postgres14
+
+- name: Configure | Apply extra postgresql.conf settings
+  community.windows.win_lineinfile:
+    path: "{{ pg14_postgresql_conf }}"
+    regex: '^\s*#?\s*{{ item.key }}\s*='
+    line: "{{ item.key }} = {{ item.value }}"
+    backup: true
+  loop: "{{ pg14_extra_settings }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: Restart postgres14
+
+- name: Configure | Allow the required pg_hba connections
+  community.windows.win_lineinfile:
+    path: "{{ pg14_pg_hba_conf }}"
+    regex: '^host\s+all\s+all\s+{{ item.split()[3] | regex_escape }}\s+'
+    line: "{{ item }}"
+    backup: true
+  loop: "{{ pg14_hba_entries }}"
+  loop_control:
+    label: "{{ item }}"
+  notify: Restart postgres14
+
+- name: Configure | Apply configuration (restart only if something changed)
+  ansible.builtin.meta: flush_handlers
+
+- name: Configure | Wait for PostgreSQL {{ pg14_major_version }} on port {{ pg14_port }}
+  ansible.windows.win_wait_for:
+    port: "{{ pg14_port | int }}"
+    state: started
+    timeout: 120
+
+# --------------------------------------------------------------------------
+# 5. Superuser password, databases, roles (always via the PG 14 psql + port)
+# --------------------------------------------------------------------------
+- name: Provision | Make sure the superuser password matches the supplied secret
+  ansible.windows.win_shell: |
+    & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d postgres -v ON_ERROR_STOP=1 -c `
+      "ALTER USER {{ pg14_superuser }} WITH PASSWORD '{{ pg14_superuser_password }}'"
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  when: pg14_manage_superuser_password | bool
+  changed_when: false
+  no_log: true
+
+- name: Provision | Create databases if missing
+  ansible.windows.win_shell: |
+    $exists = & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d postgres -tAc `
+      "SELECT 1 FROM pg_database WHERE datname='{{ item }}'"
+    if (-not $exists) {
+      & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d postgres -v ON_ERROR_STOP=1 -c `
+        "CREATE DATABASE \"{{ item }}\""
+      "created"
+    } else { "exists" }
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  loop: "{{ pg14_databases }}"
+  loop_control:
+    label: "{{ item }}"
+  register: pg14_db_create
+  changed_when: pg14_db_create.stdout is search('created')
+  no_log: "{{ pg14_no_log | bool }}"
+
+- name: Provision | Create login roles if missing
+  ansible.windows.win_shell: |
+    $exists = & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d postgres -tAc `
+      "SELECT 1 FROM pg_roles WHERE rolname='{{ item }}'"
+    if (-not $exists) {
+      & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d postgres -v ON_ERROR_STOP=1 -c `
+        "CREATE ROLE \"{{ item }}\" LOGIN"
+      "created"
+    } else { "exists" }
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  loop: "{{ pg14_roles }}"
+  loop_control:
+    label: "{{ item }}"
+  register: pg14_role_create
+  changed_when: pg14_role_create.stdout is search('created')
+  no_log: "{{ pg14_no_log | bool }}"
+
+# --------------------------------------------------------------------------
+# 6. pgvector
+# --------------------------------------------------------------------------
+- name: Pgvector | Check whether the pgvector binaries are already installed
+  ansible.windows.win_stat:
+    path: "{{ pg14_pgvector_dll }}"
+  register: pg14_pgvector_dll_stat
+  when: pg14_pgvector_enabled | bool
+
+- name: Pgvector | Install the pgvector binaries
+  when:
+    - pg14_pgvector_enabled | bool
+    - not (pg14_pgvector_dll_stat.stat.exists | default(false))
+    - pg14_pgvector_install_method in ['build', 'prebuilt']
+  block:
+    # --- option A: official route, compile with nmake ---------------------
+    - name: Pgvector | Build from source with nmake (official Windows route)
+      when: pg14_pgvector_install_method == 'build'
+      block:
+        - name: Pgvector | Locate vcvars64.bat from Visual Studio Build Tools
+          ansible.windows.win_shell: |
+            $given = '{{ pg14_pgvector_vcvars_path }}'
+            if ($given -and (Test-Path $given)) { $given; exit 0 }
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+            if (Test-Path $vswhere) {
+              & $vswhere -latest -products * `
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+            }
+          register: pg14_vcvars
+          changed_when: false
+
+        - name: Pgvector | Stop with instructions if the C++ build tools are missing
+          ansible.builtin.assert:
+            that:
+              - pg14_vcvars.stdout | trim | length > 0
+            fail_msg: >-
+              pgvector has no official pre-built Windows binaries, so it must be
+              compiled with nmake, but no Visual Studio C++ Build Tools were
+              found on this host. Install them once (free, no IDE needed):
+              `winget install Microsoft.VisualStudio.2022.BuildTools` and add the
+              "Desktop development with C++" workload, or set
+              pg14_pgvector_vcvars_path to an existing vcvars64.bat.
+              Alternatively build pgvector on another machine and set
+              pg14_pgvector_install_method=prebuilt with pg14_pgvector_prebuilt_url.
+              PostgreSQL {{ pg14_version }} itself is installed and running -
+              only pgvector is outstanding.
+
+        - name: Pgvector | Download the pinned pgvector source (v{{ pg14_pgvector_version }})
+          ansible.windows.win_shell: |
+            if (-not (Test-Path '{{ pg14_pgvector_src_dir }}\Makefile.win')) {
+              if (Test-Path '{{ pg14_pgvector_src_dir }}') {
+                Remove-Item -Recurse -Force '{{ pg14_pgvector_src_dir }}'
+              }
+              git clone --branch v{{ pg14_pgvector_version }} --depth 1 `
+                {{ pg14_pgvector_git_url }} '{{ pg14_pgvector_src_dir }}'
+            }
+            Test-Path '{{ pg14_pgvector_src_dir }}\Makefile.win'
+          register: pg14_pgvector_clone
+          changed_when: pg14_pgvector_clone.stdout is not search('True')
+
+        - name: Pgvector | Compile and install into {{ pg14_install_dir }}
+          ansible.windows.win_shell: |
+            call "{{ pg14_vcvars.stdout | trim }}" && ^
+            set "PGROOT={{ pg14_install_dir }}" && ^
+            cd /d "{{ pg14_pgvector_src_dir }}" && ^
+            nmake /F Makefile.win && ^
+            nmake /F Makefile.win install
+          args:
+            executable: cmd.exe
+          changed_when: true
+
+    # --- option B: a ZIP you built and pinned yourself --------------------
+    - name: Pgvector | Install from a pre-built ZIP
+      when: pg14_pgvector_install_method == 'prebuilt'
+      block:
+        - name: Pgvector | A pre-built ZIP URL is required for this method
+          ansible.builtin.assert:
+            that:
+              - pg14_pgvector_prebuilt_url | length > 0
+            fail_msg: >-
+              pg14_pgvector_install_method=prebuilt needs
+              pg14_pgvector_prebuilt_url pointing at a ZIP containing
+              lib\vector.dll and share\extension\vector.control /
+              vector--*.sql, built for PostgreSQL {{ pg14_major_version }} x64.
+
+        - name: Pgvector | Download the pre-built pgvector ZIP
+          ansible.windows.win_get_url:
+            url: "{{ pg14_pgvector_prebuilt_url }}"
+            dest: "{{ pg14_pgvector_zip_path }}"
+            force: false
+
+        - name: Pgvector | Unpack it over the PostgreSQL {{ pg14_major_version }} install
+          community.windows.win_unzip:
+            src: "{{ pg14_pgvector_zip_path }}"
+            dest: "{{ pg14_install_dir }}"
+
+- name: Pgvector | Verify the installed files and enable the extension
+  when: pg14_pgvector_enabled | bool
+  block:
+    - name: Pgvector | Confirm vector.dll and vector.control are in place
+      ansible.windows.win_stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ pg14_pgvector_dll }}"
+        - "{{ pg14_pgvector_control }}"
+      register: pg14_pgvector_files
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Pgvector | Fail if the pgvector binaries are still missing
+      ansible.builtin.assert:
+        that:
+          - pg14_pgvector_files.results | map(attribute='stat.exists') | min
+        fail_msg: >-
+          pgvector binaries not found under {{ pg14_install_dir }}
+          (lib\vector.dll, share\extension\vector.control). See
+          pg14_pgvector_install_method in defaults/main.yml.
+
+    - name: Pgvector | CREATE EXTENSION vector in each target database
+      ansible.windows.win_shell: |
+        & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d '{{ item }}' -v ON_ERROR_STOP=1 -c `
+          "CREATE EXTENSION IF NOT EXISTS vector"
+      environment:
+        PGPASSWORD: "{{ pg14_superuser_password }}"
+      loop: "{{ pg14_pgvector_databases }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+      no_log: "{{ pg14_no_log | bool }}"
+
+    - name: Pgvector | Report the installed pgvector version per database
+      ansible.windows.win_shell: |
+        & '{{ pg14_psql }}' -p {{ pg14_port }} -U {{ pg14_superuser }} -d '{{ item }}' -tAc `
+          "SELECT extname || ' ' || extversion FROM pg_extension WHERE extname='vector'"
+      environment:
+        PGPASSWORD: "{{ pg14_superuser_password }}"
+      loop: "{{ pg14_pgvector_databases }}"
+      loop_control:
+        label: "{{ item }}"
+      register: pg14_pgvector_check
+      changed_when: false
+      no_log: "{{ pg14_no_log | bool }}"
+
+    - name: Pgvector | Every target database must report the vector extension
+      ansible.builtin.assert:
+        that:
+          - pg14_pgvector_check.results | map(attribute='stdout') | map('trim') | min | length > 0
+        fail_msg: "pgvector is installed on disk but CREATE EXTENSION did not take effect."
+        success_msg: >-
+          pgvector enabled: {{ pg14_pgvector_check.results
+          | map(attribute='stdout') | map('trim') | list | join(', ') }}
+
+# --------------------------------------------------------------------------
+# 7. Version-suffixed CLI wrappers (PG 10's psql/pg_dumpall stay untouched)
+# --------------------------------------------------------------------------
+- name: Wrappers | Create version-suffixed command-line wrappers
+  when: pg14_create_cli_wrappers | bool
+  block:
+    - name: Wrappers | Ensure the wrapper directory exists
+      ansible.windows.win_file:
+        path: "{{ pg14_cli_wrapper_dir }}"
+        state: directory
+
+    - name: Wrappers | Install psql14 / pg_dump14 / pg_dumpall14 / pg_restore14 / postgres14-status
+      ansible.windows.win_template:
+        src: cli_wrapper.bat.j2
+        dest: "{{ pg14_cli_wrapper_dir }}\\{{ item.file }}"
+      loop:
+        - { file: "psql{{ pg14_major_version }}.bat", exe: psql.exe, desc: "interactive terminal" }
+        - { file: "pg_dump{{ pg14_major_version }}.bat", exe: pg_dump.exe, desc: "database backup" }
+        - { file: "pg_dumpall{{ pg14_major_version }}.bat", exe: pg_dumpall.exe, desc: "cluster backup" }
+        - { file: "pg_restore{{ pg14_major_version }}.bat", exe: pg_restore.exe, desc: "database restore" }
+        - { file: "postgres{{ pg14_major_version }}-status.bat", exe: pg_ctl.exe, desc: "service status" }
+      loop_control:
+        label: "{{ item.file }}"
+
+    # Only the wrapper directory goes on PATH. Its file names are version
+    # suffixed, so they can never shadow PG 10's psql.exe / pg_dumpall.exe.
+    - name: Wrappers | Put only the wrapper directory on the machine PATH
+      ansible.windows.win_path:
+        elements: "{{ pg14_cli_wrapper_dir }}"
+        state: present
+      when: pg14_add_wrapper_dir_to_system_path | bool
+
+# Deliberately opt-in, default off - see pg14_add_bin_to_system_path.
+- name: PATH | Add the PostgreSQL {{ pg14_major_version }} bin directory to the machine PATH (opt-in)
+  ansible.windows.win_path:
+    elements: "{{ pg14_bin_dir }}"
+    state: present
+  when: pg14_add_bin_to_system_path | bool
+
+# --------------------------------------------------------------------------
+# 8. Firewall - a new rule for 5433 only; the existing rules are untouched
+# --------------------------------------------------------------------------
+- name: Firewall | Allow inbound TCP {{ pg14_port }} for PostgreSQL {{ pg14_major_version }}
+  community.windows.win_firewall_rule:
+    name: "{{ pg14_firewall_rule_name }}"
+    localport: "{{ pg14_port }}"
+    protocol: tcp
+    direction: in
+    action: allow
+    enabled: true
+    profiles: "{{ pg14_firewall_profiles }}"
+    state: present
+  when: pg14_open_firewall | bool
+
+# --------------------------------------------------------------------------
+# 9. Final verification - new instance healthy, PostgreSQL 10 unchanged
+# --------------------------------------------------------------------------
+- name: Verify | Final state of the PostgreSQL {{ pg14_major_version }} service
+  ansible.windows.win_service:
+    name: "{{ pg14_service_name }}"
+  register: pg14_service_final
+  changed_when: false
+
+- name: Verify | PostgreSQL 10 service state (after)
+  ansible.windows.win_service:
+    name: "{{ pg10_service_name }}"
+  register: pg10_service_after
+  failed_when: false
+  changed_when: false
+  when: pg14_verify_existing_pg10 | bool
+
+- name: Verify | PostgreSQL 10 port {{ pg10_port }} listening (after)
+  ansible.windows.win_shell: |
+    if (Get-NetTCPConnection -LocalPort {{ pg10_port }} -State Listen -ErrorAction SilentlyContinue) {
+      "LISTENING"
+    } else { "NOT-LISTENING" }
+  register: pg10_port_after
+  changed_when: false
+  failed_when: false
+  when: pg14_verify_existing_pg10 | bool
+
+- name: Verify | The new instance must be running
+  ansible.builtin.assert:
+    that:
+      - pg14_service_final.state == 'running'
+      - pg14_service_final.start_mode == 'auto'
+    fail_msg: "PostgreSQL {{ pg14_major_version }} ({{ pg14_service_name }}) is not running."
+    success_msg: "PostgreSQL {{ pg14_major_version }} is running on port {{ pg14_port }}."
+
+- name: Verify | PostgreSQL 10 must be exactly as we found it
+  ansible.builtin.assert:
+    that:
+      - (pg10_service_after.state | default('absent')) == (pg10_service_before.state | default('absent'))
+      - (pg10_port_after.stdout | trim) == (pg10_port_before.stdout | trim)
+    fail_msg: >-
+      PostgreSQL 10 changed during this run (service
+      {{ pg10_service_before.state | default('absent') }} ->
+      {{ pg10_service_after.state | default('absent') }}, port {{ pg10_port }}
+      {{ pg10_port_before.stdout | trim }} -> {{ pg10_port_after.stdout | trim }}).
+      Investigate before handing over - this role never restarts that service.
+    success_msg: "PostgreSQL 10 on port {{ pg10_port }} is unchanged."
+  when:
+    - pg14_verify_existing_pg10 | bool
+    - pg10_service_before.exists | default(false)
+
+- name: Summary | Both instances side by side
+  ansible.builtin.debug:
+    msg:
+      - "==================== PostgreSQL instances on {{ inventory_hostname }} ===================="
+      - "LEGACY  PostgreSQL 10.x | service {{ pg10_service_name }} | port {{ pg10_port }} | {{ pg10_install_dir }} | data {{ pg10_data_dir }} | state {{ pg10_service_after.state | default('not installed') }}"
+      - "NEW     PostgreSQL {{ pg14_identity.stdout | trim }} | service {{ pg14_service_name }} | port {{ pg14_port }} | {{ pg14_install_dir }} | data {{ pg14_data_dir }} | state {{ pg14_service_final.state }}"
+      - "pgvector {{ pg14_pgvector_version }}: {{ (pg14_pgvector_check.results | default([])) | map(attribute='stdout') | map('trim') | list | join(', ') | default('disabled', true) }}"
+      - "Client tools for the new instance: psql{{ pg14_major_version }}, pg_dump{{ pg14_major_version }}, pg_dumpall{{ pg14_major_version }}, pg_restore{{ pg14_major_version }} (in {{ pg14_cli_wrapper_dir }})"
+      - "Connect with: psql{{ pg14_major_version }} -h localhost -U {{ pg14_superuser }} -d {{ pg14_databases | first }}"

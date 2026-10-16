@@ -1,0 +1,13 @@
+# Rendered exactly like ansible/windows/inventory/inventory.ini.j2
+# (Jenkinsfile-provision-windows style, `j2 --format=json`):
+#   ANSIBLE_IP_ADDRESS, ANSIBLE_USER, ANSIBLE_PASSWORD
+[windows]
+{{ ANSIBLE_IP_ADDRESS }}
+
+[windows:vars]
+ansible_user={{ ANSIBLE_USER }}
+ansible_password={{ ANSIBLE_PASSWORD }}
+ansible_connection=winrm
+ansible_winrm_transport=basic
+ansible_winrm_server_cert_validation=ignore
+ansible_port=5985
