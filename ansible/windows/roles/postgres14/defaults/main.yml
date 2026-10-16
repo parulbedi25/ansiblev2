@@ -1,0 +1,25 @@
+---
+# defaults file for roles/postgres14
+# Replica of roles/postgres (PostgreSQL 10), configured for PostgreSQL 14.
+# All variables are prefixed pg14_ so they never clash with the pg_* variables
+# of the existing PostgreSQL 10 role.
+pg14_version: "14.24-4"
+pg14_port: "5433"
+pg14_superuser: "postgres"
+pg14_superuser_password: "Welcom3!"
+pg14_db_names:
+  - "atms_master"
+  - "qasip_hub"
+pg14_roles:
+  - "admin"
+  - "developer"
+  - "app"
+  - "report"
+
+# pgvector (not part of the PostgreSQL 10 role - added for this instance)
+pg14_pgvector_enabled: true
+pg14_pgvector_version: "0.8.7"
+pg14_pgvector_git_url: "https://github.com/pgvector/pgvector.git"
+# Full path to vcvars64.bat of Visual Studio Build Tools.
+# Leave empty to auto-detect with vswhere.exe.
+pg14_pgvector_vcvars_path: ""

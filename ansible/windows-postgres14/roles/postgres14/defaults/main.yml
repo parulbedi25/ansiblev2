@@ -51,6 +51,7 @@ pg14_manage_superuser_password: true
 
 pg14_databases:
   - atms_master
+  - qasip_hub
 pg14_roles:
   - admin
   - developer
