@@ -1,0 +1,308 @@
+---
+# tasks file for roles/postgres14
+# Replica of roles/postgres/tasks/main.yml, configured for PostgreSQL 14.
+# Differences from the PostgreSQL 10 role (needed so both instances coexist):
+#   * version 14.24-4, port 5433, service postgresql-x64-14
+#   * install dir D:\QASIP\Apps\postgres14, data dir D:\QASIP\Data\postgres14
+#   * databases atms_master + qasip_hub
+#   * pgAdmin is not installed again (the PG 10 install already provides one)
+#   * the bin directory is NOT added to the system PATH, so the existing
+#     psql / pg_dumpall commands keep pointing at PostgreSQL 10
+#   * pgvector is installed and enabled at the end
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ pg14_temp_dir }}"
+    state: directory
+
+- name: Ensure PostgreSQL 14 install and data directories exist
+  win_file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - "{{ pg14_install_dir }}"
+    - "{{ pg14_data_dir }}"
+- name: Check if PostgreSQL 14 service exists
+  win_service:
+    name: "{{ pg14_service_name }}"
+  register: pg14_service_check
+  ignore_errors: yes
+- name: Resolve PostgreSQL 14 psql executable path
+  win_shell: |
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $configured = "{{ pg14_install_dir }}\bin\psql.exe"
+    if ($configured) {
+      $candidates.Add($configured)
+    }
+
+    $service = Get-CimInstance Win32_Service -Filter "Name='{{ pg14_service_name }}'" -ErrorAction SilentlyContinue
+    if ($service -and $service.PathName) {
+      $serviceExe = [regex]::Match($service.PathName, '^"([^"]+)"|^(\S+)').Groups |
+        Where-Object { $_.Value } |
+        Select-Object -First 1 -ExpandProperty Value
+      if ($serviceExe) {
+        $serviceExe = $serviceExe.Trim('"')
+        $serviceDir = Split-Path -Path $serviceExe -Parent
+        if ($serviceDir) {
+          $candidates.Add((Join-Path $serviceDir 'psql.exe'))
+        }
+      }
+    }
+
+    $resolved = $candidates |
+      Where-Object { $_ -and (Test-Path $_) } |
+      Select-Object -Unique -First 1
+
+    if ($resolved) {
+      Write-Output $resolved
+    }
+  register: pg14_psql_path_lookup
+  changed_when: false
+- name: Set PostgreSQL 14 client path
+  set_fact:
+    pg14_psql_path: "{{ (pg14_psql_path_lookup.stdout | trim) if (pg14_psql_path_lookup.stdout | trim) else (pg14_install_dir ~ '\\bin\\psql.exe') }}"
+- name: Set PostgreSQL 14 install needed
+  set_fact:
+    pg14_install_needed: "{{ not (pg14_service_check.exists | default(false)) or not ((pg14_psql_path_lookup.stdout | trim) | length > 0) }}"
+- name: Download PostgreSQL {{ pg14_version }} installer
+  win_get_url:
+    url: "{{ pg14_url }}"
+    dest: "{{ pg14_temp_dir }}\\{{ pg14_installer }}"
+  when: pg14_install_needed | bool
+- name: Install PostgreSQL {{ pg14_version }} silently
+  win_package:
+    path: "{{ pg14_temp_dir }}\\{{ pg14_installer }}"
+    arguments: >
+      --mode unattended
+      --unattendedmodeui none
+      --superaccount "{{ pg14_superuser }}"
+      --superpassword "{{ pg14_superuser_password }}"
+      --serverport {{ pg14_port }}
+      --servicename "{{ pg14_service_name }}"
+      --prefix "{{ pg14_install_dir }}"
+      --datadir "{{ pg14_data_dir }}"
+      --enable-components server,commandlinetools
+    state: present
+  when: pg14_install_needed | bool
+- meta: flush_handlers
+- name: Resolve PostgreSQL 14 psql executable path after install
+  win_shell: |
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $configured = "{{ pg14_install_dir }}\bin\psql.exe"
+    if ($configured) {
+      $candidates.Add($configured)
+    }
+
+    $service = Get-CimInstance Win32_Service -Filter "Name='{{ pg14_service_name }}'" -ErrorAction SilentlyContinue
+    if ($service -and $service.PathName) {
+      $serviceExe = [regex]::Match($service.PathName, '^"([^"]+)"|^(\S+)').Groups |
+        Where-Object { $_.Value } |
+        Select-Object -First 1 -ExpandProperty Value
+      if ($serviceExe) {
+        $serviceExe = $serviceExe.Trim('"')
+        $serviceDir = Split-Path -Path $serviceExe -Parent
+        if ($serviceDir) {
+          $candidates.Add((Join-Path $serviceDir 'psql.exe'))
+        }
+      }
+    }
+
+    $resolved = $candidates |
+      Where-Object { $_ -and (Test-Path $_) } |
+      Select-Object -Unique -First 1
+
+    if ($resolved) {
+      Write-Output $resolved
+    }
+  register: pg14_psql_path_lookup_post_install
+  changed_when: false
+  when: pg14_install_needed | bool
+- name: Set PostgreSQL 14 client path after install
+  set_fact:
+    pg14_psql_path: "{{ (pg14_psql_path_lookup_post_install.stdout | trim) if (pg14_psql_path_lookup_post_install.stdout | trim) else (pg14_install_dir ~ '\\bin\\psql.exe') }}"
+  when: pg14_install_needed | bool
+- name: Verify PostgreSQL 14 service status
+  win_service:
+    name: "{{ pg14_service_name }}"
+  register: pg14_service_status
+- name: Verify PostgreSQL 14 client exists
+  win_stat:
+    path: "{{ pg14_psql_path }}"
+  register: pg14_psql_stat
+- name: Fail if PostgreSQL 14 client is missing
+  assert:
+    that:
+      - pg14_psql_stat.stat.exists | default(false)
+    fail_msg: >
+      PostgreSQL 14 client executable not found at '{{ pg14_psql_path }}'.
+      Check the installed PostgreSQL 14 location or override pg14_install_dir/pg14_psql_path.
+
+- name: Set PostgreSQL 14 bin directory from resolved psql path
+  set_fact:
+    pg14_psql_bin_dir: "{{ pg14_psql_path | regex_replace('\\\\psql\\.exe$', '') }}"
+- name: Set PostgreSQL 14 pg_dumpall path from resolved bin directory
+  set_fact:
+    pg14_dumpall_path: "{{ pg14_psql_bin_dir }}\\pg_dumpall.exe"
+# NOTE: Unlike roles/postgres, the PostgreSQL 14 bin directory is deliberately
+# NOT added to the system PATH and the connection is NOT reset. Plain
+# psql / pg_dumpall must keep resolving to the PostgreSQL 10 binaries.
+# Use the full path (pg14_psql_path / pg14_dumpall_path) or -p 5433 explicitly.
+- name: Verify pg_dumpall executable exists
+  win_stat:
+    path: "{{ pg14_dumpall_path }}"
+  register: pg14_dumpall_stat
+- name: Fail if PostgreSQL 14 pg_dumpall is missing
+  assert:
+    that:
+      - pg14_dumpall_stat.stat.exists | default(false)
+    fail_msg: >
+      PostgreSQL 14 pg_dumpall executable not found at '{{ pg14_dumpall_path }}'.
+      Ensure PostgreSQL 14 command line tools are installed.
+- name: Verify psql is reachable by full path
+  win_shell: |
+    & "{{ pg14_psql_path }}" --version
+  changed_when: false
+- name: Verify pg_dumpall is reachable by full path
+  win_shell: |
+    & "{{ pg14_dumpall_path }}" --version
+  changed_when: false
+
+- name: Create PostgreSQL 14 databases
+  win_shell: |
+    $exists = & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d postgres `
+      -tAc "SELECT 1 FROM pg_database WHERE datname='{{ item }}'"
+    if (-not $exists) {
+      & "{{ pg14_psql_path }}" `
+        -U {{ pg14_superuser }} `
+        -p {{ pg14_port }} `
+        -d postgres `
+        -c "CREATE DATABASE {{ item }};"
+    }
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  loop: "{{ pg14_db_names }}"
+  changed_when: false
+- name: Create PostgreSQL 14 required roles
+  win_shell: |
+    $roles = ConvertFrom-Json '{{ pg14_roles | to_json }}'
+    foreach ($role in $roles) {
+      $exists = & "{{ pg14_psql_path }}" `
+        -U {{ pg14_superuser }} `
+        -p {{ pg14_port }} `
+        -d postgres `
+        -tAc "SELECT 1 FROM pg_roles WHERE rolname='${role}'"
+      if (-not $exists) {
+        & "{{ pg14_psql_path }}" `
+          -U {{ pg14_superuser }} `
+          -p {{ pg14_port }} `
+          -d postgres `
+          -c "CREATE ROLE ${role};"
+      }
+    }
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# pgvector - not part of the PostgreSQL 10 role. pgvector ships no official
+# Windows binaries, so it is compiled with nmake against this instance
+# (PGROOT = pg14_install_dir), which needs Visual Studio C++ Build Tools
+# on the target host.
+# ---------------------------------------------------------------------------
+- name: Check if pgvector is already installed
+  win_stat:
+    path: "{{ pg14_install_dir }}\\lib\\vector.dll"
+  register: pg14_pgvector_stat
+  when: pg14_pgvector_enabled | bool
+- name: Install pgvector for PostgreSQL 14
+  when:
+    - pg14_pgvector_enabled | bool
+    - not (pg14_pgvector_stat.stat.exists | default(false))
+  block:
+    - name: Locate vcvars64.bat from Visual Studio Build Tools
+      win_shell: |
+        $given = '{{ pg14_pgvector_vcvars_path }}'
+        if ($given -and (Test-Path $given)) { $given; exit 0 }
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (Test-Path $vswhere) {
+          & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+        }
+      register: pg14_pgvector_vcvars
+      changed_when: false
+    - name: Fail if Visual Studio Build Tools are missing
+      assert:
+        that:
+          - pg14_pgvector_vcvars.stdout | trim | length > 0
+        fail_msg: >
+          pgvector must be compiled with nmake but no Visual Studio C++ Build
+          Tools were found on this host. Install them
+          (winget install Microsoft.VisualStudio.2022.BuildTools, workload
+          "Desktop development with C++") or set pg14_pgvector_vcvars_path to
+          an existing vcvars64.bat, then re-run. PostgreSQL 14 itself is
+          already installed - only pgvector is outstanding.
+    - name: Download pgvector {{ pg14_pgvector_version }} source
+      win_shell: |
+        if (-not (Test-Path '{{ pg14_temp_dir }}\pgvector\Makefile.win')) {
+          if (Test-Path '{{ pg14_temp_dir }}\pgvector') {
+            Remove-Item -Recurse -Force '{{ pg14_temp_dir }}\pgvector'
+          }
+          git clone --branch v{{ pg14_pgvector_version }} --depth 1 `
+            {{ pg14_pgvector_git_url }} '{{ pg14_temp_dir }}\pgvector'
+        }
+      changed_when: false
+    - name: Build and install pgvector into PostgreSQL 14
+      win_shell: |
+        call "{{ pg14_pgvector_vcvars.stdout | trim }}" && ^
+        set "PGROOT={{ pg14_install_dir }}" && ^
+        cd /d "{{ pg14_temp_dir }}\pgvector" && ^
+        nmake /F Makefile.win && ^
+        nmake /F Makefile.win install
+      args:
+        executable: cmd.exe
+
+- name: Create pgvector extension in PostgreSQL 14 databases
+  win_shell: |
+    & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d {{ item }} `
+      -c "CREATE EXTENSION IF NOT EXISTS vector;"
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  loop: "{{ pg14_db_names }}"
+  changed_when: false
+  when: pg14_pgvector_enabled | bool
+- name: Verify pgvector extension is enabled
+  win_shell: |
+    & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d {{ item }} `
+      -tAc "SELECT extversion FROM pg_extension WHERE extname='vector'"
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  loop: "{{ pg14_db_names }}"
+  register: pg14_pgvector_check
+  changed_when: false
+  when: pg14_pgvector_enabled | bool
+- name: Fail if pgvector extension is not enabled
+  assert:
+    that:
+      - pg14_pgvector_check.results | map(attribute='stdout') | map('trim') | min | length > 0
+    fail_msg: >
+      pgvector extension is not enabled in every PostgreSQL 14 database
+      ({{ pg14_db_names | join(', ') }}). Check that vector.dll and
+      share\extension\vector.control exist under {{ pg14_install_dir }}.
+  when: pg14_pgvector_enabled | bool
+
+- name: Fail if PostgreSQL 14 service is not running
+  assert:
+    that:
+      - pg14_service_status.state == "running"
+    fail_msg: >
+      PostgreSQL 14 service '{{ pg14_service_name }}' is not running.
+      Current state: {{ pg14_service_status.state | default('unknown') }}

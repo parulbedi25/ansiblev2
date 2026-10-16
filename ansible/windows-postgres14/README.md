@@ -22,7 +22,7 @@ Jenkinsfile keep working exactly as they do today.
 | Extensions | — | **pgvector 0.8.7** (`CREATE EXTENSION vector`) |
 | Client tools | `psql`, `pg_dumpall`, … from PG 10's `bin` on PATH | `psql14`, `pg_dump14`, `pg_dumpall14`, `pg_restore14`, `postgres14-status` |
 | Firewall | — | new rule `postgres14-tcp-5433` (inbound TCP 5433) |
-| Databases / roles | `atms_master`, `admin`, `developer`, `app`, `report` | same names, created **inside the new instance** |
+| Databases / roles | `atms_master`, `admin`, `developer`, `app`, `report` | `atms_master`, `qasip_hub`; roles `admin`, `developer`, `app`, `report` — created **inside the new instance** |
 
 Password note: the new instance is deliberately given the same superuser name
 (`postgres`) and, via `secrets.yml` here, the same password as PG 10 so the
