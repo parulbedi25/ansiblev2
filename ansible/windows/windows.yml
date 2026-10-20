@@ -8,6 +8,15 @@
     pg_version: "10.17-2"
     pg_port: "5432"
 
+    # Knowledge Hub Variables (roles: postgres14, node18, python312, qdrant)
+    # Versions are pinned in each role's defaults/main.yml, override here if needed:
+ #   pg14_version: "14.24-4"
+ #   pg14_port: "5433"
+ #   node18_version: "18.20.8"
+ #   python312_version: "3.12.10"
+ #   qdrant_version: "1.19.2"
+    # Secrets for these roles (pg14_superuser_password, qdrant_api_key) are in secrets.yml
+
     # Shared download temporary directory (use D drive to keep C clean)
     temp_dir: "D:\\temp"
 
@@ -57,3 +66,8 @@
     - python-ai-service
     - node-service
     - git
+    # Knowledge Hub stack (new services only - legacy versions above stay untouched)
+    - postgres14
+    - node18
+    - python312
+    - qdrant
