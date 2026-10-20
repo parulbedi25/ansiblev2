@@ -1,0 +1,90 @@
+---
+# tasks file for roles/node18
+# Installs Node.js 18 next to the existing Node.js 10 (roles/node).
+# Node 10 (C:\Program Files\nodejs, on the machine PATH) is never touched:
+# no MSI is run and the machine PATH is left alone, so the existing
+# node-service keeps using Node 10 exactly as before.
+- name: Create temp directory
+  win_file:
+    path: "{{ node18_temp_dir }}"
+    state: directory
+
+- name: Check if Node.js 18 already exists
+  win_stat:
+    path: "{{ node18_exe }}"
+  register: node18_exe_check
+
+- name: Download Node.js {{ node18_version }} ZIP distribution
+  win_get_url:
+    url: "{{ node18_url }}"
+    dest: "{{ node18_temp_dir }}\\{{ node18_archive }}"
+    force: false
+  when: not node18_exe_check.stat.exists
+
+- name: Extract Node.js {{ node18_version }} to its own directory
+  community.windows.win_unzip:
+    src: "{{ node18_temp_dir }}\\{{ node18_archive }}"
+    dest: "{{ node18_temp_dir }}\\node18_extract"
+    creates: "{{ node18_temp_dir }}\\node18_extract\\node-v{{ node18_version }}-win-x64\\node.exe"
+  when: not node18_exe_check.stat.exists
+
+- name: Ensure Node.js 18 install directory exists
+  win_file:
+    path: "{{ node18_install_dir }}"
+    state: directory
+
+- name: Copy Node.js {{ node18_version }} files into {{ node18_install_dir }}
+  win_shell: |
+    Copy-Item -Path '{{ node18_temp_dir }}\node18_extract\node-v{{ node18_version }}-win-x64\*' `
+      -Destination '{{ node18_install_dir }}' -Recurse -Force
+  when: not node18_exe_check.stat.exists
+
+# Deliberately NOT adding node18_install_dir to the machine PATH by default.
+# Plain `node` must keep meaning Node 10. Opt in only if this host is
+# dedicated to the new services.
+- name: Add Node.js 18 to the machine PATH (opt-in, NOT recommended on shared hosts)
+  win_path:
+    elements:
+      - "{{ node18_install_dir }}"
+    scope: machine
+    state: present
+  when: node18_add_to_system_path | bool
+
+- name: Verify Node.js 18 installation (absolute path)
+  win_command: '"{{ node18_exe }}" -v'
+  register: node18_verify
+  changed_when: false
+  failed_when: false
+
+- name: Verify npm for Node.js 18 (absolute path)
+  win_command: '"{{ node18_npm }}" --version'
+  register: node18_npm_verify
+  changed_when: false
+  failed_when: false
+
+- name: Display Node.js 18 version
+  debug:
+    msg: "Node.js 18 installed at {{ node18_install_dir }}: {{ node18_verify.stdout | trim }} (npm {{ node18_npm_verify.stdout | trim }})"
+  when: node18_verify.rc == 0
+
+- name: Fail if Node.js 18 is not installed
+  fail:
+    msg: >
+      Node.js 18 is not installed at {{ node18_install_dir }}.
+      Check that {{ node18_url }} is reachable from this host.
+  when: node18_verify.rc != 0
+
+- name: Confirm the default Node.js is still the legacy one
+  win_shell: |
+    $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($cmd) { & $cmd.Source -v } else { "not-on-path" }
+  register: node18_default_node_check
+  changed_when: false
+  failed_when: false
+
+- name: Show which Node.js plain `node` still resolves to
+  debug:
+    msg: >-
+      Default `node` on PATH: {{ node18_default_node_check.stdout | trim }}
+      (expected: the legacy Node 10, unchanged). Node 18 is available at
+      {{ node18_exe }} for the new services.

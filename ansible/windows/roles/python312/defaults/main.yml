@@ -1,0 +1,13 @@
+---
+# defaults file for roles/python312
+# Python 3.12 installed SIDE BY SIDE with the existing Python 3.11 (roles/python).
+# All variables are prefixed python312_ so they never clash with roles/python.
+python312_version: "3.12.10"
+python312_install_dir: "C:\\Program Files\\Python312"
+
+# Do NOT prepend Python 3.12 to PATH: plain `python` must keep behaving as
+# Python 3.11 for the existing services. New services use the absolute path
+# (C:\Program Files\Python312\python.exe) or the Python launcher:
+#   py -3.12 -m venv .venv
+# `py -0p` lists every installed Python side by side.
+python312_prepend_path: false

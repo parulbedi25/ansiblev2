@@ -1,0 +1,13 @@
+---
+# handlers file for roles/qdrant
+- name: Restart Qdrant service
+  win_service:
+    name: "{{ qdrant_service_name }}"
+    state: restarted
+    start_mode: auto
+
+- name: Ensure Qdrant service is running
+  win_service:
+    name: "{{ qdrant_service_name }}"
+    state: started
+    start_mode: auto

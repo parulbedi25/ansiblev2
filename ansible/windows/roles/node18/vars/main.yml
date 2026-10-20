@@ -1,0 +1,10 @@
+---
+# vars file for roles/node18
+# The existing roles/node installs Node 10 from the MSI. An MSI install would
+# REPLACE Node 10, so Node 18 is installed from the official ZIP distribution
+# instead, which can live in its own directory next to Node 10.
+node18_archive: "node-v{{ node18_version }}-win-x64.zip"
+node18_url: "https://nodejs.org/dist/v{{ node18_version }}/{{ node18_archive }}"
+node18_temp_dir: "D:\\temp"
+node18_exe: "{{ node18_install_dir }}\\node.exe"
+node18_npm: "{{ node18_install_dir }}\\npm.cmd"

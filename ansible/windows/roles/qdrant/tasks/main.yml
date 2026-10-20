@@ -1,0 +1,151 @@
+---
+# tasks file for roles/qdrant
+# Installs Qdrant (new tool for the Knowledge Hub service) as a Windows
+# service via NSSM - the same pattern as roles/node-service - with durable
+# on-disk storage. Requires roles/nssm to have run first (as in windows.yml).
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ qdrant_temp_dir }}"
+    state: directory
+
+- name: Verify NSSM is available (roles/nssm must run before this role)
+  win_command: nssm version
+  register: qdrant_nssm_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail if NSSM is missing
+  fail:
+    msg: >
+      NSSM not found on this host. Run roles/nssm before roles/qdrant
+      (windows.yml already orders it that way).
+  when: qdrant_nssm_check.rc != 0
+
+- name: Ensure Qdrant directories exist
+  win_file:
+    path: "{{ item }}"
+    state: directory
+  loop:
+    - "{{ qdrant_install_dir }}"
+    - "{{ qdrant_install_dir }}\\config"
+    - "{{ qdrant_storage_dir }}"
+    - "{{ qdrant_snapshots_dir }}"
+    - "{{ qdrant_log_dir }}"
+
+- name: Check if Qdrant is already installed
+  win_stat:
+    path: "{{ qdrant_exe }}"
+  register: qdrant_exe_check
+
+- name: Download Qdrant {{ qdrant_version }} for Windows
+  win_get_url:
+    url: "{{ qdrant_url }}"
+    dest: "{{ qdrant_temp_dir }}\\{{ qdrant_archive }}"
+    force: false
+  when: not qdrant_exe_check.stat.exists
+
+- name: Extract Qdrant {{ qdrant_version }} into {{ qdrant_install_dir }}
+  community.windows.win_unzip:
+    src: "{{ qdrant_temp_dir }}\\{{ qdrant_archive }}"
+    dest: "{{ qdrant_install_dir }}"
+    creates: "{{ qdrant_exe }}"
+  when: not qdrant_exe_check.stat.exists
+
+- name: Fail if Qdrant executable is missing after extraction
+  fail:
+    msg: >
+      Qdrant executable not found at {{ qdrant_exe }} after extracting
+      {{ qdrant_archive }}. Check that {{ qdrant_url }} is reachable.
+  when: not qdrant_exe_check.stat.exists
+
+- name: Write Qdrant configuration (ports, persistent storage, API key)
+  win_template:
+    src: config.yaml.j2
+    dest: "{{ qdrant_config_file }}"
+  notify: Restart Qdrant service
+  no_log: "{{ qdrant_api_key | length > 0 }}"
+
+- name: Check if Qdrant service already exists
+  win_service:
+    name: "{{ qdrant_service_name }}"
+  register: qdrant_service_check
+  failed_when: false
+
+- name: Create Qdrant service using NSSM
+  win_command: >-
+    nssm install "{{ qdrant_service_name }}"
+    "{{ qdrant_exe }}"
+    "--config-path {{ qdrant_config_file }}"
+  when: not (qdrant_service_check.exists | default(false))
+
+- name: Set Qdrant service display name
+  win_command: nssm set "{{ qdrant_service_name }}" DisplayName "{{ qdrant_service_display_name }}"
+  when: not (qdrant_service_check.exists | default(false))
+
+- name: Set Qdrant service description
+  win_command: nssm set "{{ qdrant_service_name }}" Description "{{ qdrant_service_description }}"
+  when: not (qdrant_service_check.exists | default(false))
+
+- name: Set Qdrant service working directory
+  win_command: nssm set "{{ qdrant_service_name }}" AppDirectory "{{ qdrant_install_dir }}"
+
+- name: Set Qdrant service stdout log
+  win_command: nssm set "{{ qdrant_service_name }}" AppStdout "{{ qdrant_log_dir }}\\stdout.log"
+
+- name: Set Qdrant service stderr log
+  win_command: nssm set "{{ qdrant_service_name }}" AppStderr "{{ qdrant_log_dir }}\\stderr.log"
+
+- name: Set Qdrant log rotation
+  win_command: nssm set "{{ qdrant_service_name }}" AppRotateFiles 1
+
+- name: Set Qdrant log rotation size (10 MB)
+  win_command: nssm set "{{ qdrant_service_name }}" AppRotateBytes 10485760
+
+- name: Configure Qdrant service restart on failure
+  win_command: nssm set "{{ qdrant_service_name }}" AppExit Default Restart
+
+- name: Apply any pending Qdrant restart (configuration changed)
+  meta: flush_handlers
+
+- name: Ensure Qdrant service is running and automatic
+  win_service:
+    name: "{{ qdrant_service_name }}"
+    state: started
+    start_mode: auto
+
+- name: Wait for Qdrant HTTP port {{ qdrant_http_port }}
+  win_wait_for:
+    port: "{{ qdrant_http_port | int }}"
+    state: started
+    timeout: 120
+
+- name: Verify Qdrant health endpoint
+  win_uri:
+    url: "http://localhost:{{ qdrant_http_port }}/healthz"
+    status_code: 200
+    return_content: true
+  register: qdrant_health
+  changed_when: false
+  retries: 6
+  delay: 5
+  until: qdrant_health.status_code | default(0) == 200
+
+- name: Allow inbound TCP {{ qdrant_http_port }} for Qdrant
+  community.windows.win_firewall_rule:
+    name: "{{ qdrant_firewall_rule_name }}"
+    localport: "{{ qdrant_http_port }}"
+    protocol: tcp
+    direction: in
+    action: allow
+    enabled: true
+    profiles: "{{ qdrant_firewall_profiles }}"
+    state: present
+  when: qdrant_open_firewall | bool
+
+- name: Display Qdrant installation status
+  debug:
+    msg: >-
+      Qdrant {{ qdrant_version }} is running as service
+      {{ qdrant_service_name }} on port {{ qdrant_http_port }}
+      (storage: {{ qdrant_storage_dir }}). Health check:
+      {{ qdrant_health.content | default('ok') | trim }}
