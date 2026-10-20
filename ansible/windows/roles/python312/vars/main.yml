@@ -1,0 +1,8 @@
+---
+# vars file for roles/python312
+# Python installers are side-by-side friendly per version line: 3.12 lands in
+# Python312 and never overwrites the existing Python311 install.
+python312_installer: "python-{{ python312_version }}-amd64.exe"
+python312_url: "https://www.python.org/ftp/python/{{ python312_version }}/{{ python312_installer }}"
+python312_temp_dir: "D:\\temp"
+python312_exe: "{{ python312_install_dir }}\\python.exe"

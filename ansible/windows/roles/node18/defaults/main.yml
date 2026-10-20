@@ -1,0 +1,12 @@
+---
+# defaults file for roles/node18
+# Node.js 18 installed SIDE BY SIDE with the existing Node.js 10 (roles/node).
+# All variables are prefixed node18_ so they never clash with node_* of roles/node.
+node18_version: "18.20.8"
+node18_install_dir: "D:\\QASIP\\Apps\\node18"
+
+# Do NOT put Node 18 on the machine PATH: plain `node` / `npm` must keep
+# resolving to Node 10 (C:\Program Files\nodejs) for the existing services.
+# New builds call D:\QASIP\Apps\node18\node.exe (or npm.cmd) by absolute path,
+# or put that directory first in PATH for the duration of their build step.
+node18_add_to_system_path: false

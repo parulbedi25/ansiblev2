@@ -1,0 +1,27 @@
+---
+# defaults file for roles/qdrant
+# Qdrant vector database (new tool - no existing role). Installed as a
+# Windows service via NSSM, the same pattern as roles/node-service.
+# Knowledge Hub backend connects to it (QASIP_HUB_QDRANT_URL=http://<host>:6333).
+qdrant_version: "1.19.2"
+qdrant_install_dir: "D:\\QASIP\\Apps\\qdrant"
+qdrant_storage_dir: "D:\\QASIP\\Data\\qdrant\\storage"
+qdrant_snapshots_dir: "D:\\QASIP\\Data\\qdrant\\snapshots"
+qdrant_http_port: "6333"
+qdrant_grpc_port: "6334"
+
+qdrant_service_name: "QASIP-Qdrant"
+qdrant_service_display_name: "QASIP Qdrant Vector Database"
+qdrant_service_description: "Qdrant vector database for Knowledge Hub (qasip_hub)"
+
+# API key for Qdrant. Empty = no authentication (only acceptable on a
+# trusted network). Set a real value from secrets.yml / Jenkins extra-vars;
+# the same value goes into QASIP_HUB_QDRANT_API_KEY on the backend.
+qdrant_api_key: ""
+
+qdrant_open_firewall: true
+qdrant_firewall_rule_name: "qdrant-tcp-{{ qdrant_http_port }}"
+qdrant_firewall_profiles: [Domain, Private, Public]
+
+# Directory that holds the NSSM-rotated service logs.
+qdrant_log_dir: "{{ qdrant_install_dir }}\\logs"

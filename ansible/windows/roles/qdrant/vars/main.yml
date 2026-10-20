@@ -1,0 +1,7 @@
+---
+# vars file for roles/qdrant
+qdrant_archive: "qdrant-x86_64-pc-windows-msvc.zip"
+qdrant_url: "https://github.com/qdrant/qdrant/releases/download/v{{ qdrant_version }}/{{ qdrant_archive }}"
+qdrant_temp_dir: "D:\\temp"
+qdrant_exe: "{{ qdrant_install_dir }}\\qdrant.exe"
+qdrant_config_file: "{{ qdrant_install_dir }}\\config\\config.yaml"

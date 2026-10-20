@@ -1,0 +1,66 @@
+---
+# tasks file for roles/python312
+# Installs Python 3.12 next to the existing Python 3.11 (roles/python).
+# Python 3.11 (per-user install under AppData\...\Python311, on PATH) is never
+# touched: 3.12 goes to its own Program Files directory and is NOT prepended
+# to PATH, so plain `python` keeps meaning 3.11 for the existing services.
+# New services select 3.12 explicitly via the absolute path or `py -3.12`.
+- name: Ensure temp directory exists
+  win_file:
+    path: "{{ python312_temp_dir }}"
+    state: directory
+
+- name: Check if Python 3.12 already exists
+  win_stat:
+    path: "{{ python312_exe }}"
+  register: python312_exe_check
+
+- name: Download Python {{ python312_version }} installer
+  win_get_url:
+    url: "{{ python312_url }}"
+    dest: "{{ python312_temp_dir }}\\{{ python312_installer }}"
+    force: false
+  when: not python312_exe_check.stat.exists
+
+- name: Install Python {{ python312_version }} silently (all users, own directory, no PATH prepend)
+  win_package:
+    path: "{{ python312_temp_dir }}\\{{ python312_installer }}"
+    arguments: >
+      /quiet
+      InstallAllUsers=1
+      TargetDir="{{ python312_install_dir }}"
+      PrependPath={{ 1 if (python312_prepend_path | bool) else 0 }}
+      Include_launcher=1
+      Include_test=0
+    state: present
+  when: not python312_exe_check.stat.exists
+
+- name: Verify Python 3.12 installation (absolute path)
+  win_command: '"{{ python312_exe }}" --version'
+  register: python312_verify
+  changed_when: false
+  failed_when: false
+
+- name: Fail if Python 3.12 is not installed
+  fail:
+    msg: >
+      Python 3.12 is not installed at {{ python312_exe }}.
+      Check that {{ python312_url }} is reachable from this host.
+  when: python312_verify.rc != 0 or '3.12' not in (python312_verify.stdout | default(''))
+
+- name: List every Python installed side by side (py launcher)
+  win_shell: |
+    $py = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($py) { & $py.Source -0p } else { "py launcher not found" }
+  register: python312_py_list
+  changed_when: false
+  failed_when: false
+
+- name: Display Python installation status
+  debug:
+    msg: |
+      Python 3.12 installed: {{ python312_verify.stdout | trim }} at {{ python312_install_dir }}
+      Installed Pythons (py launcher):
+      {{ python312_py_list.stdout | trim }}
+      Plain `python` is unchanged (still Python 3.11 from roles/python).
+      New services use: py -3.12 -m venv .venv   (or {{ python312_exe }})
