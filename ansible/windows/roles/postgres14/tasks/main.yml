@@ -233,9 +233,12 @@
         }
       register: pg14_pgvector_vcvars
       changed_when: false
+    - name: Remember vcvars64.bat path
+      set_fact:
+        pg14_vcvars_path: "{{ pg14_pgvector_vcvars.stdout | trim }}"
     - name: Install Visual Studio 2022 Build Tools via Chocolatey (needed to compile pgvector)
       when:
-        - pg14_pgvector_vcvars.stdout | trim | length == 0
+        - pg14_vcvars_path | length == 0
         - pg14_pgvector_install_build_tools | bool
       block:
         - name: Install Visual Studio 2022 Build Tools package
@@ -248,6 +251,10 @@
             name: visualstudio2022-workload-vctools
             state: present
 
+        # NOTE: a separate register name is used on purpose. A SKIPPED task
+        # still registers {'skipped': true}, so reusing pg14_pgvector_vcvars
+        # here would wipe out the path found above whenever this block is
+        # skipped (the normal case once Build Tools are installed).
         - name: Re-locate vcvars64.bat after Build Tools installation
           win_shell: |
             $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -256,13 +263,17 @@
                 -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
                 -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
             }
-          register: pg14_pgvector_vcvars
+          register: pg14_pgvector_vcvars_after_install
           changed_when: false
+
+        - name: Remember vcvars64.bat path after Build Tools installation
+          set_fact:
+            pg14_vcvars_path: "{{ pg14_pgvector_vcvars_after_install.stdout | trim }}"
 
     - name: Fail if Visual Studio Build Tools are missing
       assert:
         that:
-          - pg14_pgvector_vcvars.stdout | trim | length > 0
+          - pg14_vcvars_path | length > 0
         fail_msg: >
           pgvector must be compiled with nmake but no Visual Studio C++ Build
           Tools were found on this host, and the automatic Chocolatey install

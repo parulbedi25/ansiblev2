@@ -7,7 +7,7 @@ REM  "&& ^" one-liners (those fail silently under Ansible's cmd.exe handling).
 REM ===========================================================================
 
 REM 1. Load the Visual Studio C++ build environment (sets up nmake/cl)
-call "{{ pg14_pgvector_vcvars.stdout | trim }}"
+call "{{ pg14_vcvars_path }}"
 if errorlevel 1 exit /b %errorlevel%
 
 REM 2. Tell pgvector which PostgreSQL installation to build against
