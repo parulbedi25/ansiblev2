@@ -233,13 +233,42 @@
         }
       register: pg14_pgvector_vcvars
       changed_when: false
+    - name: Install Visual Studio 2022 Build Tools via Chocolatey (needed to compile pgvector)
+      when:
+        - pg14_pgvector_vcvars.stdout | trim | length == 0
+        - pg14_pgvector_install_build_tools | bool
+      block:
+        - name: Install Visual Studio 2022 Build Tools package
+          win_chocolatey:
+            name: visualstudio2022buildtools
+            state: present
+
+        - name: Install Visual Studio 2022 C++ workload (MSVC + Windows SDK)
+          win_chocolatey:
+            name: visualstudio2022-workload-vctools
+            state: present
+
+        - name: Re-locate vcvars64.bat after Build Tools installation
+          win_shell: |
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+            if (Test-Path $vswhere) {
+              & $vswhere -latest -products * `
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
+            }
+          register: pg14_pgvector_vcvars
+          changed_when: false
+
     - name: Fail if Visual Studio Build Tools are missing
       assert:
         that:
           - pg14_pgvector_vcvars.stdout | trim | length > 0
         fail_msg: >
           pgvector must be compiled with nmake but no Visual Studio C++ Build
-          Tools were found on this host. Install them
+          Tools were found on this host, and the automatic Chocolatey install
+          (pg14_pgvector_install_build_tools) did not produce vcvars64.bat.
+          The Build Tools installation sometimes needs a REBOOT - reboot the
+          host and re-run the playbook. Otherwise install the tools manually
           (winget install Microsoft.VisualStudio.2022.BuildTools, workload
           "Desktop development with C++") or set pg14_pgvector_vcvars_path to
           an existing vcvars64.bat, then re-run. PostgreSQL 14 itself is
