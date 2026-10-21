@@ -1,9 +1,9 @@
 ---
 # defaults file for roles/postgres14
-# Replica of roles/postgres (PostgreSQL 10), configured for PostgreSQL 14.
+# Replica of roles/postgres (PostgreSQL 10), configured for PostgreSQL 18.
 # All variables are prefixed pg14_ so they never clash with the pg_* variables
 # of the existing PostgreSQL 10 role.
-pg14_version: "14.24-4"
+pg14_version: "18.6-5"
 pg14_port: "5433"
 pg14_superuser: "postgres"
 pg14_superuser_password: "Welcom3!"
@@ -21,12 +21,8 @@ pg14_pgvector_enabled: true
 pg14_pgvector_version: "0.8.7"
 pg14_pgvector_git_url: "https://github.com/pgvector/pgvector.git"
 # Full path to vcvars64.bat of Visual Studio Build Tools.
-# Leave empty to auto-detect with vswhere.exe.
+# Leave empty to auto-detect with vswhere.exe. The tools are expected to be
+# part of the base Windows image - this role does NOT install them; it only
+# locates vcvars64.bat so the pgvector build .bat can load the compiler
+# environment before running nmake (the Windows form of make / make install).
 pg14_pgvector_vcvars_path: ""
-# If vcvars64.bat is not found, install Visual Studio 2022 Build Tools
-# (with the C++ workload) automatically via Chocolatey, then continue.
-# A reboot may occasionally be required after the tools install - the role
-# stops with a clear message in that case; just re-run the playbook.
-# Set false to manage Build Tools outside Ansible (role will fail with
-# instructions instead of installing them).
-pg14_pgvector_install_build_tools: true

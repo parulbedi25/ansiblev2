@@ -1,8 +1,8 @@
 ---
 # tasks file for roles/postgres14
-# Replica of roles/postgres/tasks/main.yml, configured for PostgreSQL 14.
+# Replica of roles/postgres/tasks/main.yml, configured for PostgreSQL 18.
 # Differences from the PostgreSQL 10 role (needed so both instances coexist):
-#   * version 14.24-4, port 5433, service postgresql-x64-14
+#   * version 14.24-4, port 5433, service postgresql-x64-18
 #   * install dir D:\QASIP\Apps\postgres14, data dir D:\QASIP\Data\postgres14
 #   * databases atms_master + qasip_hub
 #   * pgAdmin is not installed again (the PG 10 install already provides one)
@@ -14,19 +14,19 @@
     path: "{{ pg14_temp_dir }}"
     state: directory
 
-- name: Ensure PostgreSQL 14 install and data directories exist
+- name: Ensure PostgreSQL 18 install and data directories exist
   win_file:
     path: "{{ item }}"
     state: directory
   loop:
     - "{{ pg14_install_dir }}"
     - "{{ pg14_data_dir }}"
-- name: Check if PostgreSQL 14 service exists
+- name: Check if PostgreSQL 18 service exists
   win_service:
     name: "{{ pg14_service_name }}"
   register: pg14_service_check
   ignore_errors: yes
-- name: Resolve PostgreSQL 14 psql executable path
+- name: Resolve PostgreSQL 18 psql executable path
   win_shell: |
     $candidates = New-Object System.Collections.Generic.List[string]
     $configured = "{{ pg14_install_dir }}\bin\psql.exe"
@@ -57,10 +57,10 @@
     }
   register: pg14_psql_path_lookup
   changed_when: false
-- name: Set PostgreSQL 14 client path
+- name: Set PostgreSQL 18 client path
   set_fact:
     pg14_psql_path: "{{ (pg14_psql_path_lookup.stdout | trim) if (pg14_psql_path_lookup.stdout | trim) else (pg14_install_dir ~ '\\bin\\psql.exe') }}"
-- name: Set PostgreSQL 14 install needed
+- name: Set PostgreSQL 18 install needed
   set_fact:
     pg14_install_needed: "{{ not (pg14_service_check.exists | default(false)) or not ((pg14_psql_path_lookup.stdout | trim) | length > 0) }}"
 - name: Download PostgreSQL {{ pg14_version }} installer
@@ -84,7 +84,7 @@
     state: present
   when: pg14_install_needed | bool
 - meta: flush_handlers
-- name: Resolve PostgreSQL 14 psql executable path after install
+- name: Resolve PostgreSQL 18 psql executable path after install
   win_shell: |
     $candidates = New-Object System.Collections.Generic.List[string]
     $configured = "{{ pg14_install_dir }}\bin\psql.exe"
@@ -116,33 +116,33 @@
   register: pg14_psql_path_lookup_post_install
   changed_when: false
   when: pg14_install_needed | bool
-- name: Set PostgreSQL 14 client path after install
+- name: Set PostgreSQL 18 client path after install
   set_fact:
     pg14_psql_path: "{{ (pg14_psql_path_lookup_post_install.stdout | trim) if (pg14_psql_path_lookup_post_install.stdout | trim) else (pg14_install_dir ~ '\\bin\\psql.exe') }}"
   when: pg14_install_needed | bool
-- name: Verify PostgreSQL 14 service status
+- name: Verify PostgreSQL 18 service status
   win_service:
     name: "{{ pg14_service_name }}"
   register: pg14_service_status
-- name: Verify PostgreSQL 14 client exists
+- name: Verify PostgreSQL 18 client exists
   win_stat:
     path: "{{ pg14_psql_path }}"
   register: pg14_psql_stat
-- name: Fail if PostgreSQL 14 client is missing
+- name: Fail if PostgreSQL 18 client is missing
   assert:
     that:
       - pg14_psql_stat.stat.exists | default(false)
     fail_msg: >
-      PostgreSQL 14 client executable not found at '{{ pg14_psql_path }}'.
-      Check the installed PostgreSQL 14 location or override pg14_install_dir/pg14_psql_path.
+      PostgreSQL 18 client executable not found at '{{ pg14_psql_path }}'.
+      Check the installed PostgreSQL 18 location or override pg14_install_dir/pg14_psql_path.
 
-- name: Set PostgreSQL 14 bin directory from resolved psql path
+- name: Set PostgreSQL 18 bin directory from resolved psql path
   set_fact:
     pg14_psql_bin_dir: "{{ pg14_psql_path | regex_replace('\\\\psql\\.exe$', '') }}"
-- name: Set PostgreSQL 14 pg_dumpall path from resolved bin directory
+- name: Set PostgreSQL 18 pg_dumpall path from resolved bin directory
   set_fact:
     pg14_dumpall_path: "{{ pg14_psql_bin_dir }}\\pg_dumpall.exe"
-# NOTE: Unlike roles/postgres, the PostgreSQL 14 bin directory is deliberately
+# NOTE: Unlike roles/postgres, the PostgreSQL 18 bin directory is deliberately
 # NOT added to the system PATH and the connection is NOT reset. Plain
 # psql / pg_dumpall must keep resolving to the PostgreSQL 10 binaries.
 # Use the full path (pg14_psql_path / pg14_dumpall_path) or -p 5433 explicitly.
@@ -150,13 +150,13 @@
   win_stat:
     path: "{{ pg14_dumpall_path }}"
   register: pg14_dumpall_stat
-- name: Fail if PostgreSQL 14 pg_dumpall is missing
+- name: Fail if PostgreSQL 18 pg_dumpall is missing
   assert:
     that:
       - pg14_dumpall_stat.stat.exists | default(false)
     fail_msg: >
-      PostgreSQL 14 pg_dumpall executable not found at '{{ pg14_dumpall_path }}'.
-      Ensure PostgreSQL 14 command line tools are installed.
+      PostgreSQL 18 pg_dumpall executable not found at '{{ pg14_dumpall_path }}'.
+      Ensure PostgreSQL 18 command line tools are installed.
 - name: Verify psql is reachable by full path
   win_shell: |
     & "{{ pg14_psql_path }}" --version
@@ -166,7 +166,7 @@
     & "{{ pg14_dumpall_path }}" --version
   changed_when: false
 
-- name: Create PostgreSQL 14 databases
+- name: Create PostgreSQL 18 databases
   win_shell: |
     $exists = & "{{ pg14_psql_path }}" `
       -U {{ pg14_superuser }} `
@@ -184,7 +184,7 @@
     PGPASSWORD: "{{ pg14_superuser_password }}"
   loop: "{{ pg14_db_names }}"
   changed_when: false
-- name: Create PostgreSQL 14 required roles
+- name: Create PostgreSQL 18 required roles
   win_shell: |
     $roles = ConvertFrom-Json '{{ pg14_roles | to_json }}'
     foreach ($role in $roles) {
@@ -216,7 +216,7 @@
     path: "{{ pg14_install_dir }}\\lib\\vector.dll"
   register: pg14_pgvector_stat
   when: pg14_pgvector_enabled | bool
-- name: Install pgvector for PostgreSQL 14
+- name: Install pgvector for PostgreSQL 18
   when:
     - pg14_pgvector_enabled | bool
     - not (pg14_pgvector_stat.stat.exists | default(false))
@@ -236,54 +236,18 @@
     - name: Remember vcvars64.bat path
       set_fact:
         pg14_vcvars_path: "{{ pg14_pgvector_vcvars.stdout | trim }}"
-    - name: Install Visual Studio 2022 Build Tools via Chocolatey (needed to compile pgvector)
-      when:
-        - pg14_vcvars_path | length == 0
-        - pg14_pgvector_install_build_tools | bool
-      block:
-        - name: Install Visual Studio 2022 Build Tools package
-          win_chocolatey:
-            name: visualstudio2022buildtools
-            state: present
-
-        - name: Install Visual Studio 2022 C++ workload (MSVC + Windows SDK)
-          win_chocolatey:
-            name: visualstudio2022-workload-vctools
-            state: present
-
-        # NOTE: a separate register name is used on purpose. A SKIPPED task
-        # still registers {'skipped': true}, so reusing pg14_pgvector_vcvars
-        # here would wipe out the path found above whenever this block is
-        # skipped (the normal case once Build Tools are installed).
-        - name: Re-locate vcvars64.bat after Build Tools installation
-          win_shell: |
-            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-            if (Test-Path $vswhere) {
-              & $vswhere -latest -products * `
-                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-                -find 'VC\Auxiliary\Build\vcvars64.bat' | Select-Object -First 1
-            }
-          register: pg14_pgvector_vcvars_after_install
-          changed_when: false
-
-        - name: Remember vcvars64.bat path after Build Tools installation
-          set_fact:
-            pg14_vcvars_path: "{{ pg14_pgvector_vcvars_after_install.stdout | trim }}"
-
     - name: Fail if Visual Studio Build Tools are missing
       assert:
         that:
           - pg14_vcvars_path | length > 0
         fail_msg: >
-          pgvector must be compiled with nmake but no Visual Studio C++ Build
-          Tools were found on this host, and the automatic Chocolatey install
-          (pg14_pgvector_install_build_tools) did not produce vcvars64.bat.
-          The Build Tools installation sometimes needs a REBOOT - reboot the
-          host and re-run the playbook. Otherwise install the tools manually
-          (winget install Microsoft.VisualStudio.2022.BuildTools, workload
-          "Desktop development with C++") or set pg14_pgvector_vcvars_path to
-          an existing vcvars64.bat, then re-run. PostgreSQL 14 itself is
-          already installed - only pgvector is outstanding.
+          nmake / Visual Studio C++ Build Tools were not found on this host
+          (no vcvars64.bat). They are expected to be part of the base Windows
+          image - if they are genuinely absent, install Visual Studio 2022
+          Build Tools with the "Desktop development with C++" workload once,
+          or set pg14_pgvector_vcvars_path to an existing vcvars64.bat, then
+          re-run. PostgreSQL 18 itself is already installed - only pgvector
+          is outstanding.
     - name: Download pgvector {{ pg14_pgvector_version }} source
       win_shell: |
         if (-not (Test-Path '{{ pg14_temp_dir }}\pgvector\Makefile.win')) {
@@ -299,11 +263,11 @@
         src: pgvector_build.bat.j2
         dest: "{{ pg14_temp_dir }}\\build_pgvector.bat"
 
-    - name: Build and install pgvector into PostgreSQL 14
+    - name: Build and install pgvector into PostgreSQL 18
       win_command: 'cmd.exe /c "{{ pg14_temp_dir }}\\build_pgvector.bat"'
       register: pg14_pgvector_build
 
-- name: Create pgvector extension in PostgreSQL 14 databases
+- name: Create pgvector extension in PostgreSQL 18 databases
   win_shell: |
     & "{{ pg14_psql_path }}" `
       -U {{ pg14_superuser }} `
@@ -333,15 +297,15 @@
     that:
       - pg14_pgvector_check.results | map(attribute='stdout') | map('trim') | min | length > 0
     fail_msg: >
-      pgvector extension is not enabled in every PostgreSQL 14 database
+      pgvector extension is not enabled in every PostgreSQL 18 database
       ({{ pg14_db_names | join(', ') }}). Check that vector.dll and
       share\extension\vector.control exist under {{ pg14_install_dir }}.
   when: pg14_pgvector_enabled | bool
 
-- name: Fail if PostgreSQL 14 service is not running
+- name: Fail if PostgreSQL 18 service is not running
   assert:
     that:
       - pg14_service_status.state == "running"
     fail_msg: >
-      PostgreSQL 14 service '{{ pg14_service_name }}' is not running.
+      PostgreSQL 18 service '{{ pg14_service_name }}' is not running.
       Current state: {{ pg14_service_status.state | default('unknown') }}
