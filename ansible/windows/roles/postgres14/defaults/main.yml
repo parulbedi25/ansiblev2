@@ -16,6 +16,15 @@ pg14_roles:
   - "app"
   - "report"
 
+# pgAdmin - the LATEST standalone pgAdmin 4 from postgresql.org.
+# The pgAdmin bundled with old EDB installs crashes with a fatal error, so
+# this role installs/upgrades pgAdmin separately to the version below.
+# It upgrades any existing pgAdmin 4 on the host (same default install dir)
+# and works against BOTH PostgreSQL 10 (5432) and this instance (5433).
+pg14_pgadmin_enabled: true
+pg14_pgadmin_version: "9.18"
+pg14_pgadmin_install_dir: "C:\\Program Files\\pgAdmin 4"
+
 # pgvector (not part of the PostgreSQL 10 role - added for this instance)
 pg14_pgvector_enabled: true
 pg14_pgvector_version: "0.8.7"

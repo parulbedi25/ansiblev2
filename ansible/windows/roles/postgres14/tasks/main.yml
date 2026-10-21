@@ -2,10 +2,11 @@
 # tasks file for roles/postgres14
 # Replica of roles/postgres/tasks/main.yml, configured for PostgreSQL 18.
 # Differences from the PostgreSQL 10 role (needed so both instances coexist):
-#   * version 14.24-4, port 5433, service postgresql-x64-18
-#   * install dir D:\QASIP\Apps\postgres14, data dir D:\QASIP\Data\postgres14
+#   * version 18.6-5, port 5433, service postgresql-x64-18
+#   * install dir D:\QASIP\Apps\postgres18, data dir D:\QASIP\Data\postgres18
 #   * databases atms_master + qasip_hub
-#   * pgAdmin is not installed again (the PG 10 install already provides one)
+#   * pgAdmin: the LATEST standalone pgAdmin 4 is installed/upgraded
+#     separately (the old pgAdmin bundled with EDB crashes with a fatal error)
 #   * the bin directory is NOT added to the system PATH, so the existing
 #     psql / pg_dumpall commands keep pointing at PostgreSQL 10
 #   * pgvector is installed and enabled at the end
@@ -204,6 +205,64 @@
   environment:
     PGPASSWORD: "{{ pg14_superuser_password }}"
   changed_when: false
+
+# ---------------------------------------------------------------------------
+# pgAdmin - latest standalone pgAdmin 4 (official postgresql.org installer).
+# The pgAdmin bundled with old EDB installers crashes on launch with a
+# fatal error, so pgAdmin is installed/upgraded separately here. It is a
+# client tool only: one pgAdmin serves both PostgreSQL 10 (5432) and this
+# instance (5433, add it as a server inside pgAdmin).
+# ---------------------------------------------------------------------------
+- name: Check installed pgAdmin version
+  win_shell: |
+    if (Test-Path '{{ pg14_pgadmin_exe }}') {
+      (Get-Item '{{ pg14_pgadmin_exe }}').VersionInfo.ProductVersion
+    } else { "" }
+  register: pg14_pgadmin_current
+  changed_when: false
+  failed_when: false
+  when: pg14_pgadmin_enabled | bool
+
+- name: Decide whether pgAdmin {{ pg14_pgadmin_version }} has to be installed/upgraded
+  set_fact:
+    pg14_pgadmin_install_needed: >-
+      {{ not ((pg14_pgadmin_current.stdout | default('') | trim) is match(pg14_pgadmin_version | regex_escape)) }}
+  when: pg14_pgadmin_enabled | bool
+
+- name: Download pgAdmin {{ pg14_pgadmin_version }} installer
+  win_get_url:
+    url: "{{ pg14_pgadmin_url }}"
+    dest: "{{ pg14_temp_dir }}\\{{ pg14_pgadmin_installer }}"
+    force: false
+  when:
+    - pg14_pgadmin_enabled | bool
+    - pg14_pgadmin_install_needed | bool
+
+- name: Install/upgrade pgAdmin {{ pg14_pgadmin_version }} silently
+  win_package:
+    path: "{{ pg14_temp_dir }}\\{{ pg14_pgadmin_installer }}"
+    arguments: "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART"
+    creates_path: "{{ pg14_pgadmin_exe }}"
+    state: present
+  when:
+    - pg14_pgadmin_enabled | bool
+    - pg14_pgadmin_install_needed | bool
+
+- name: Verify pgAdmin executable exists
+  win_stat:
+    path: "{{ pg14_pgadmin_exe }}"
+  register: pg14_pgadmin_stat
+  when: pg14_pgadmin_enabled | bool
+
+- name: Fail if pgAdmin is not installed
+  assert:
+    that:
+      - pg14_pgadmin_stat.stat.exists | default(false)
+    fail_msg: >
+      pgAdmin {{ pg14_pgadmin_version }} executable not found at
+      {{ pg14_pgadmin_exe }}. Check that {{ pg14_pgadmin_url }} is
+      reachable from this host.
+  when: pg14_pgadmin_enabled | bool
 
 # ---------------------------------------------------------------------------
 # pgvector - not part of the PostgreSQL 10 role. pgvector ships no official

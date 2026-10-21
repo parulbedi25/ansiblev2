@@ -14,7 +14,12 @@ that role with the same file structure and approach, configured with:
 Deliberate differences from `roles/postgres`, so the two instances coexist:
 
 - all variables are prefixed `pg14_` (no clash with `pg_*`)
-- pgAdmin is not installed a second time
+- pgAdmin: the **latest standalone pgAdmin 4 (9.18)** is installed/upgraded
+  from the official postgresql.org installer. The pgAdmin bundled with old
+  EDB installers crashes on launch with a fatal error; the standalone
+  installer replaces/upgrades it. One pgAdmin serves both PostgreSQL 10
+  (port 5432) and this instance (port 5433) - add each as a server in pgAdmin.
+  Disable with `pg14_pgadmin_enabled: false`, pin via `pg14_pgadmin_version`.
 - the PostgreSQL 18 `bin` directory is **not** added to the system PATH -
   plain `psql` / `pg_dumpall` keep resolving to PostgreSQL 10. Use the full
   paths (`pg14_psql_path`, `pg14_dumpall_path`) or port 5433 explicitly.
