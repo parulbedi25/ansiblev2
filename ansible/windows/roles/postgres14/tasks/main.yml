@@ -283,15 +283,14 @@
             {{ pg14_pgvector_git_url }} '{{ pg14_temp_dir }}\pgvector'
         }
       changed_when: false
+    - name: Write pgvector build script
+      win_template:
+        src: pgvector_build.bat.j2
+        dest: "{{ pg14_temp_dir }}\\build_pgvector.bat"
+
     - name: Build and install pgvector into PostgreSQL 14
-      win_shell: |
-        call "{{ pg14_pgvector_vcvars.stdout | trim }}" && ^
-        set "PGROOT={{ pg14_install_dir }}" && ^
-        cd /d "{{ pg14_temp_dir }}\pgvector" && ^
-        nmake /F Makefile.win && ^
-        nmake /F Makefile.win install
-      args:
-        executable: cmd.exe
+      win_command: 'cmd.exe /c "{{ pg14_temp_dir }}\\build_pgvector.bat"'
+      register: pg14_pgvector_build
 
 - name: Create pgvector extension in PostgreSQL 14 databases
   win_shell: |
