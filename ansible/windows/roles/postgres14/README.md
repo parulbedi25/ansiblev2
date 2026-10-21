@@ -22,10 +22,15 @@ Deliberate differences from `roles/postgres`, so the two instances coexist:
 Requirements
 ------------
 
-Windows target reachable over WinRM. For pgvector: Visual Studio C++ Build
-Tools on the target (pgvector has no official Windows binaries and is built
-with `nmake`), and `git` to fetch the pgvector source. Set
-`pg14_pgvector_enabled: false` in `defaults/main.yml` to skip pgvector.
+Windows target reachable over WinRM. For pgvector: `git` to fetch the
+pgvector source, and Visual Studio C++ Build Tools (pgvector has no official
+Windows binaries and is built with `nmake`). The Build Tools do NOT need to
+be pre-installed: if `vcvars64.bat` is missing, the role installs
+`visualstudio2022buildtools` + `visualstudio2022-workload-vctools` via
+Chocolatey automatically (`pg14_pgvector_install_build_tools: true` in
+`defaults/main.yml`; set it to `false` to manage the tools yourself).
+A reboot may occasionally be needed after the tools install - re-run the
+playbook in that case. Set `pg14_pgvector_enabled: false` to skip pgvector.
 
 Role Variables
 --------------
