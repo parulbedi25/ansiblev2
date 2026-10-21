@@ -1,6 +1,6 @@
 galaxy_info:
   author: your name
-  description: PostgreSQL 14 (port 5433) with pgvector - replica of roles/postgres for a second instance beside PostgreSQL 10
+  description: PostgreSQL 18 (port 5433) with pgvector - replica of roles/postgres for a second instance beside PostgreSQL 10
   company: your company (optional)
 
   # If the issue tracker for your role is not on github, uncomment the

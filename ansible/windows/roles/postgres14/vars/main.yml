@@ -3,6 +3,12 @@
 pg14_installer: "postgresql-{{ pg14_version }}-windows-x64.exe"
 pg14_url: "https://get.enterprisedb.com/postgresql/{{ pg14_installer }}"
 pg14_temp_dir: "D:\\temp"
-pg14_install_dir: "D:\\QASIP\\Apps\\postgres14"
-pg14_data_dir: "D:\\QASIP\\Data\\postgres14"
-pg14_service_name: "postgresql-x64-14"
+pg14_install_dir: "D:\\QASIP\\Apps\\postgres18"
+pg14_data_dir: "D:\\QASIP\\Data\\postgres18"
+pg14_service_name: "postgresql-x64-18"
+
+# Latest standalone pgAdmin 4 (official postgresql.org download - NOT the
+# old pgAdmin bundled with EDB installers, which crashes with a fatal error)
+pg14_pgadmin_installer: "pgadmin4-{{ pg14_pgadmin_version }}-x64.exe"
+pg14_pgadmin_url: "https://ftp.postgresql.org/pub/pgadmin/pgadmin4/v{{ pg14_pgadmin_version }}/windows/{{ pg14_pgadmin_installer }}"
+pg14_pgadmin_exe: "{{ pg14_pgadmin_install_dir }}\\runtime\\pgAdmin4.exe"
