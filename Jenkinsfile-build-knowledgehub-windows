@@ -28,7 +28,7 @@
  * Hostnames are NOT parameters: the infra pipeline (hosts-entry role) already
  * added "qajarvis.com" and "<instance>.qajarvis.com" to the Windows hosts
  * file, so this pipeline derives the target hostname itself at runtime
- * (TARGET_HOSTNAME = <project>.qajarvis.com, project = first part of
+ * (KNOWLEDGE_HUB_HOSTNAME = <project>.qajarvis.com, project = first part of
  * PROJECT_TARGET_MACHINE) and fills QASIP_HUB_PUBLIC_URL, CORS_ORIGINS,
  * QDRANT_URL, the DATABASE_URL host and VITE_HUB_API_URL from it.
  *
@@ -46,149 +46,81 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         timestamps()
-        disableConcurrentBuilds()
     }
 
     parameters {
-
         string(
             name: 'PROJECT_TARGET_MACHINE',
-            defaultValue: '',
-            description: 'Jenkins agent label of the target machine (format: project-env-ip, eg: copper-dev-10.10.6.116)'
+            description: 'Jenkins agent label where the application will be deployed. Format: project-environment-ip (example: copper-dev-10.10.3.150). Ensure the label exactly matches an existing Jenkins node.'
         )
-
-        string(
-            name: 'GIT_BRANCH',
-            defaultValue: 'main',
-            description: 'Branch to pull in D:\\copper-code\\AI-Python (ignored if the folder is not a git checkout)'
-        )
-
-        choice(
-            name: 'LLM_PROVIDER',
-            choices: ['openai', 'azure_openai'],
-            description: 'LLM provider for the backend'
-        )
-
-        string(
-            name: 'OPENAI_MODEL',
-            defaultValue: '',
-            description: 'Model / Azure deployment model name (QASIP_HUB_OPENAI_MODEL)'
-        )
-
-        string(
-            name: 'AZURE_OPENAI_ENDPOINT',
-            defaultValue: '',
-            description: 'Only for azure_openai: https://<resource>.openai.azure.com/'
-        )
-
-        string(
-            name: 'AZURE_OPENAI_API_VERSION',
-            defaultValue: '',
-            description: 'Only for azure_openai: Azure OpenAI API version'
-        )
-
-        string(
-            name: 'AZURE_OPENAI_DEPLOYMENT',
-            defaultValue: '',
-            description: 'Only for azure_openai: deployment name'
-        )
-
-        string(
-            name: 'NGINX_HTML_DIR',
-            defaultValue: 'C:\\qasip\\qasip\\nginx-1.8.1\\nginx\\html',
-            description: 'Nginx html directory that already hosts the existing Angular UI (Hub UI goes into a subfolder - the existing UI is NOT touched)'
-        )
-
-        string(
-            name: 'ADMIN_UI_PATH',
-            defaultValue: 'knowledge-hub',
-            description: 'Subfolder inside NGINX_HTML_DIR for the Knowledge Hub admin UI'
-        )
-
-        booleanParam(
-            name: 'DEPLOY_FRONTEND',
-            defaultValue: true,
-            description: 'Build and publish the Knowledge Hub admin frontend'
-        )
-
-        booleanParam(
-            name: 'RECREATE_VENV',
-            defaultValue: false,
-            description: 'Delete and recreate the backend .venv from scratch (slow - use when Python deps are broken)'
-        )
-
-        booleanParam(
-            name: 'CREATE_TENANT',
-            defaultValue: false,
-            description: 'Create a tenant after deployment (one-time setup)'
-        )
-
-        string(
-            name: 'TENANT_NAME',
-            defaultValue: '',
-            description: 'Tenant name (required only when CREATE_TENANT is checked)'
-        )
-
-        string(
-            name: 'TENANT_ID',
-            defaultValue: '',
-            description: 'Tenant id used only for the SSE verification call (optional)'
-        )
-
         string(
             name: 'NOTIFICATION_EMAILS',
             defaultValue: '',
-            description: 'Comma-separated email addresses'
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
         )
     }
 
     environment {
+        // Keys follow the common deploy-pipeline header, prefixed with
+        // KNOWLEDGE_HUB_ so this job's values never clash with other apps.
+        KNOWLEDGE_HUB_PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
+        KNOWLEDGE_HUB_NEXUS_URL            = 'http://10.10.5.220:8081'
+        KNOWLEDGE_HUB_NEXUS_REPO           = 'atms-modules'
+        KNOWLEDGE_HUB_NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+        KNOWLEDGE_HUB_TOMCAT_HOME          = 'D:\\QASIP\\Apps\\tomcat'
+        KNOWLEDGE_HUB_TOMCAT_WEBAPPS       = 'D:\\QASIP\\Apps\\tomcat\\webapps'
+        KNOWLEDGE_HUB_TOMCAT_ROOT          = 'D:\\QASIP\\Apps\\tomcat\\webapps\\ROOT'
+        KNOWLEDGE_HUB_TOMCAT_LOGS          = 'D:\\QASIP\\Apps\\tomcat\\logs'
+        KNOWLEDGE_HUB_NGINX_ROOT_DIR       = 'D:\\QASIP\\Apps\\nginx'
+        KNOWLEDGE_HUB_NGINX_HTML_DIR       = 'D:\\QASIP\\Apps\\nginx\\html'
+        KNOWLEDGE_HUB_AI_DEPLOY_DIR        = 'D:\\QASIP\\Apps\\python-ai-service'
+        KNOWLEDGE_HUB_AI_APP_DIR           = 'D:\\QASIP\\Apps\\python-ai-service\\test_script_generator'
+        KNOWLEDGE_HUB_NODE_DEPLOY_DIR      = 'D:\\QASIP\\Apps\\node-service'
+        KNOWLEDGE_HUB_ANSIBLE_OS           = "windows"
+        // Python path is fixed to the side-by-side Python 3.12 installed by
+        // Ansible (plain `python` on these machines is still Python 3.11)
 
-        // ---- Code layout (already present on the target machine) ----
-        HUB_CODE_DIR     = 'D:\\copper-code\\AI-Python'
-        HUB_BACKEND_DIR  = "${HUB_CODE_DIR}\\Knowledge_Hub"
-        HUB_FRONTEND_DIR = "${HUB_CODE_DIR}\\Knowledge_Hub_Admin"
-        VENV_DIR         = "${HUB_BACKEND_DIR}\\.venv"
-
-        // ---- Tool locations (side-by-side versions installed by Ansible) ----
-        PYTHON312_EXE = 'C:\\Program Files\\Python312\\python.exe'
-        NODE18_DIR    = 'D:\\QASIP\\Apps\\node18'
-
-        // ---- Backend service ----
-        BACKEND_SERVICE_NAME = 'QASIP-KnowledgeHub'
-        BACKEND_LOG_DIR      = "${HUB_BACKEND_DIR}\\logs"
+        // ---- Knowledge Hub specific (code is already on the machine) ----
+        KNOWLEDGE_HUB_CODE_DIR     = 'D:\\copper-code\\AI-Python'
+        KNOWLEDGE_HUB_BACKEND_DIR  = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub"
+        KNOWLEDGE_HUB_FRONTEND_DIR = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub_Admin"
+        KNOWLEDGE_HUB_VENV_DIR     = "${KNOWLEDGE_HUB_BACKEND_DIR}\\.venv"
+        KNOWLEDGE_HUB_PYTHON_EXE   = 'C:\\Program Files\\Python312\\python.exe'
+        KNOWLEDGE_HUB_NODE18_DIR   = 'D:\\QASIP\\Apps\\node18'
+        KNOWLEDGE_HUB_SERVICE_NAME = 'QASIP-KnowledgeHub'
+        KNOWLEDGE_HUB_LOG_DIR      = "${KNOWLEDGE_HUB_BACKEND_DIR}\\logs"
+        KNOWLEDGE_HUB_ADMIN_UI_PATH = 'knowledge-hub'
 
         // ---- Hostname (derived, not a parameter) ----
         // The infra pipeline's hosts-entry role already added
         // "qajarvis.com" and "<instance>.qajarvis.com" to the Windows hosts
         // file, so the hostname is filled here during pipeline execution.
-        PROJECT_NAME    = "${params.PROJECT_TARGET_MACHINE.split('-')[0]}"
-        TARGET_HOSTNAME = "${PROJECT_NAME.toLowerCase()}.qajarvis.com"
+        KNOWLEDGE_HUB_HOSTNAME = "${KNOWLEDGE_HUB_PROJECT_NAME}.qajarvis.com"
 
-        // ---- QASIP_HUB_* backend environment (non-secret values) ----
-        // Secrets (API keys, DB password) are injected from Jenkins
-        // credentials; QASIP_HUB_SECRET_KEY is generated by the pipeline
-        // itself in the 'Generate Secret Key' stage.
+        // ---- QASIP_HUB_* backend application environment ----
+        // (These names are read by the Knowledge Hub app itself, so they
+        //  keep their QASIP_HUB_ names; secrets come from Jenkins
+        //  credentials / the generated secret key - never from git.)
         QASIP_HUB_HOST                 = '0.0.0.0'
         QASIP_HUB_PORT                 = '8000'
         QASIP_HUB_RELOAD               = 'false'
-        QASIP_HUB_CORS_ORIGINS         = "https://${TARGET_HOSTNAME}"
-        QASIP_HUB_PUBLIC_URL           = "https://${TARGET_HOSTNAME}"
-        QASIP_HUB_LLM_PROVIDER         = "${params.LLM_PROVIDER}"
-        QASIP_HUB_OPENAI_MODEL         = "${params.OPENAI_MODEL}"
-        QASIP_HUB_AZURE_OPENAI_ENDPOINT    = "${params.AZURE_OPENAI_ENDPOINT}"
-        QASIP_HUB_AZURE_OPENAI_API_VERSION = "${params.AZURE_OPENAI_API_VERSION}"
-        QASIP_HUB_AZURE_OPENAI_DEPLOYMENT  = "${params.AZURE_OPENAI_DEPLOYMENT}"
+        QASIP_HUB_CORS_ORIGINS         = "https://${KNOWLEDGE_HUB_HOSTNAME}"
+        QASIP_HUB_PUBLIC_URL           = "https://${KNOWLEDGE_HUB_HOSTNAME}"
+        QASIP_HUB_LLM_PROVIDER         = 'openai'
+        QASIP_HUB_OPENAI_MODEL         = ''
+        QASIP_HUB_AZURE_OPENAI_ENDPOINT    = ''
+        QASIP_HUB_AZURE_OPENAI_API_VERSION = ''
+        QASIP_HUB_AZURE_OPENAI_DEPLOYMENT  = ''
         QASIP_HUB_EMBEDDING_PROVIDER   = 'local'
         QASIP_HUB_LOCAL_EMBEDDING_MODEL = 'BAAI/bge-small-en-v1.5'
         QASIP_HUB_VECTOR_BACKEND       = 'qdrant'
-        QASIP_HUB_QDRANT_URL           = "http://${TARGET_HOSTNAME}:6333"
+        QASIP_HUB_QDRANT_URL           = "http://${KNOWLEDGE_HUB_HOSTNAME}:6333"
         QASIP_HUB_QDRANT_COLLECTION    = 'ku_index'
         QASIP_HUB_LOG_LEVEL            = 'INFO'
         QASIP_HUB_AUDIT_ENABLED        = 'true'
 
         // Frontend build variable (baked into the JS bundle at build time)
-        VITE_HUB_API_URL = "https://${TARGET_HOSTNAME}"
+        VITE_HUB_API_URL = "https://${KNOWLEDGE_HUB_HOSTNAME}"
     }
 
     stages {
@@ -199,7 +131,6 @@ pipeline {
                 script {
                     def missing = []
                     if (!params.PROJECT_TARGET_MACHINE?.trim()) missing << 'PROJECT_TARGET_MACHINE'
-                    if (params.CREATE_TENANT && !params.TENANT_NAME?.trim()) missing << 'TENANT_NAME (CREATE_TENANT is checked)'
                     if (missing) {
                         error "Missing required parameters: ${missing.join(', ')}"
                     }
@@ -208,13 +139,12 @@ pipeline {
                     KNOWLEDGE HUB DEPLOYMENT
                     ========================================
                     Target Machine : ${params.PROJECT_TARGET_MACHINE}
-                    Hostname       : ${env.TARGET_HOSTNAME} (hosts entry from infra pipeline)
-                    Code Directory : ${env.HUB_CODE_DIR}
-                    Backend Dir    : ${env.HUB_BACKEND_DIR}
-                    Frontend Dir   : ${env.HUB_FRONTEND_DIR}
-                    Backend Service: ${env.BACKEND_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
-                    LLM Provider   : ${params.LLM_PROVIDER}
-                    Deploy Frontend: ${params.DEPLOY_FRONTEND}
+                    Hostname       : ${env.KNOWLEDGE_HUB_HOSTNAME} (hosts entry from infra pipeline)
+                    Code Directory : ${env.KNOWLEDGE_HUB_CODE_DIR}
+                    Backend Dir    : ${env.KNOWLEDGE_HUB_BACKEND_DIR}
+                    Frontend Dir   : ${env.KNOWLEDGE_HUB_FRONTEND_DIR}
+                    Backend Service: ${env.KNOWLEDGE_HUB_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
+                    LLM Provider   : ${env.QASIP_HUB_LLM_PROVIDER}
                     ========================================
                     """
                 }
@@ -233,49 +163,47 @@ pipeline {
                     echo Machine hostname:
                     hostname
 
-                    echo Checking hosts entry for ${env.TARGET_HOSTNAME} ...
-                    findstr /I /C:"${env.TARGET_HOSTNAME}" "%SystemRoot%\\System32\\drivers\\etc\\hosts" >nul
+                    echo Checking hosts entry for ${env.KNOWLEDGE_HUB_HOSTNAME} ...
+                    findstr /I /C:"${env.KNOWLEDGE_HUB_HOSTNAME}" "%SystemRoot%\\System32\\drivers\\etc\\hosts" >nul
                     if %ERRORLEVEL% NEQ 0 (
-                        echo ERROR: No hosts entry for ${env.TARGET_HOSTNAME}
+                        echo ERROR: No hosts entry for ${env.KNOWLEDGE_HUB_HOSTNAME}
                         echo The infra pipeline ^(hosts-entry role^) must run first - it adds
-                        echo qajarvis.com and ${env.TARGET_HOSTNAME} to the Windows hosts file.
+                        echo qajarvis.com and ${env.KNOWLEDGE_HUB_HOSTNAME} to the Windows hosts file.
                         exit /b 1
                     )
-                    echo [OK] Hosts entry found for ${env.TARGET_HOSTNAME}
+                    echo [OK] Hosts entry found for ${env.KNOWLEDGE_HUB_HOSTNAME}
 
                     echo Filled during this pipeline execution:
                     echo   QASIP_HUB_PUBLIC_URL  = ${env.QASIP_HUB_PUBLIC_URL}
                     echo   QASIP_HUB_CORS_ORIGINS= ${env.QASIP_HUB_CORS_ORIGINS}
                     echo   QASIP_HUB_QDRANT_URL  = ${env.QASIP_HUB_QDRANT_URL}
-                    echo   DATABASE host         = ${env.TARGET_HOSTNAME}:5433
+                    echo   DATABASE host         = ${env.KNOWLEDGE_HUB_HOSTNAME}:5433
                     echo   VITE_HUB_API_URL      = ${env.VITE_HUB_API_URL}
                 """
             }
         }
 
         // ------------------------------------------------------------------
-        stage('Update Source Code') {
+        stage('Verify Source Code') {
             steps {
                 bat """
                     @echo off
-                    if not exist "${env.HUB_BACKEND_DIR}" (
-                        echo ERROR: Backend code not found at ${env.HUB_BACKEND_DIR}
-                        echo Expected the AI-Python code at ${env.HUB_CODE_DIR} on this machine.
+                    echo ========================================
+                    echo Verifying code already present on this machine
+                    echo ========================================
+
+                    if not exist "${env.KNOWLEDGE_HUB_BACKEND_DIR}" (
+                        echo ERROR: Backend code not found at ${env.KNOWLEDGE_HUB_BACKEND_DIR}
+                        echo Expected the AI-Python code at ${env.KNOWLEDGE_HUB_CODE_DIR} on this machine.
                         exit /b 1
                     )
-                    if exist "${env.HUB_CODE_DIR}\\.git" (
-                        echo Updating code in ${env.HUB_CODE_DIR} [branch: ${params.GIT_BRANCH}]...
-                        cd /d "${env.HUB_CODE_DIR}"
-                        git fetch --all
-                        git checkout ${params.GIT_BRANCH}
-                        git pull
-                        if %ERRORLEVEL% NEQ 0 (
-                            echo ERROR: git pull failed
-                            exit /b 1
-                        )
-                    ) else (
-                        echo No .git in ${env.HUB_CODE_DIR} - deploying the code already on disk.
+                    if not exist "${env.KNOWLEDGE_HUB_FRONTEND_DIR}" (
+                        echo ERROR: Frontend code not found at ${env.KNOWLEDGE_HUB_FRONTEND_DIR}
+                        exit /b 1
                     )
+                    echo [OK] Backend code : ${env.KNOWLEDGE_HUB_BACKEND_DIR}
+                    echo [OK] Frontend code: ${env.KNOWLEDGE_HUB_FRONTEND_DIR}
+                    echo No checkout/pull is performed - the code on the machine is deployed as-is.
                 """
             }
         }
@@ -285,13 +213,13 @@ pipeline {
             steps {
                 bat """
                     @echo off
-                    sc query "${env.BACKEND_SERVICE_NAME}" >nul 2>&1
+                    sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" >nul 2>&1
                     if %ERRORLEVEL% EQU 0 (
-                        echo Stopping ${env.BACKEND_SERVICE_NAME}...
-                        net stop "${env.BACKEND_SERVICE_NAME}" 2>nul || echo Service was not running
+                        echo Stopping ${env.KNOWLEDGE_HUB_SERVICE_NAME}...
+                        net stop "${env.KNOWLEDGE_HUB_SERVICE_NAME}" 2>nul || echo Service was not running
                         timeout /t 3 /nobreak >nul
                     ) else (
-                        echo Service ${env.BACKEND_SERVICE_NAME} does not exist yet - skipping stop.
+                        echo Service ${env.KNOWLEDGE_HUB_SERVICE_NAME} does not exist yet - skipping stop.
                     )
                     echo NOTE: only the Knowledge Hub service is stopped. Other Python
                     echo services (eg ATMS-Python-AI) are deliberately NOT touched.
@@ -310,24 +238,17 @@ pipeline {
                     echo Creating virtual environment (Python 3.12)
                     echo ========================================
 
-                    if not exist "${env.PYTHON312_EXE}" (
-                        echo ERROR: Python 3.12 not found at ${env.PYTHON312_EXE}
+                    if not exist "${env.KNOWLEDGE_HUB_PYTHON_EXE}" (
+                        echo ERROR: Python 3.12 not found at ${env.KNOWLEDGE_HUB_PYTHON_EXE}
                         echo Run Ansible provisioning first ^(python312 role^).
                         exit /b 1
                     )
 
-                    cd /d "${env.HUB_BACKEND_DIR}"
-
-                    if "${params.RECREATE_VENV}" == "true" (
-                        if exist ".venv" (
-                            echo Recreating virtual environment...
-                            rmdir /S /Q ".venv"
-                        )
-                    )
+                    cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
 
                     if not exist ".venv\\Scripts\\python.exe" (
                         echo python -m venv .venv
-                        "${env.PYTHON312_EXE}" -m venv .venv
+                        "${env.KNOWLEDGE_HUB_PYTHON_EXE}" -m venv .venv
                         if %ERRORLEVEL% NEQ 0 (
                             echo ERROR: Failed to create venv
                             exit /b 1
@@ -353,10 +274,10 @@ pipeline {
                     echo Installing adapters into the virtual environment
                     echo ========================================
 
-                    cd /d "${env.HUB_BACKEND_DIR}"
+                    cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                     call .venv\\Scripts\\activate.bat
 
-                    cd /d "${env.HUB_CODE_DIR}"
+                    cd /d "${env.KNOWLEDGE_HUB_CODE_DIR}"
 
                     pip install -e .\\Project_Brain
                     if %ERRORLEVEL% NEQ 0 (
@@ -393,7 +314,7 @@ pipeline {
                         echo Generating QASIP_HUB_SECRET_KEY (Fernet)
                         echo ========================================
 
-                        cd /d "${env.HUB_BACKEND_DIR}"
+                        cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                         call .venv\\Scripts\\activate.bat
 
                         rem The Fernet key generation needs the cryptography package.
@@ -443,7 +364,7 @@ pipeline {
                     echo Installing Knowledge Hub backend
                     echo ========================================
 
-                    cd /d "${env.HUB_BACKEND_DIR}"
+                    cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                     call .venv\\Scripts\\activate.bat
 
                     python --version
@@ -470,7 +391,7 @@ pipeline {
             steps {
                 bat """
                     @echo off
-                    cd /d "${env.HUB_BACKEND_DIR}"
+                    cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                     call .venv\\Scripts\\activate.bat
 
                     python -c "from importlib.metadata import entry_points; print([e.name for e in entry_points(group='qasip_hub.adapters')])" > "%TEMP%\\kh_adapters.txt" 2>&1
@@ -516,15 +437,15 @@ pipeline {
                         echo Applying database migrations (alembic)
                         echo ========================================
 
-                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.TARGET_HOSTNAME}:5433/qasip_hub"
+                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_HOSTNAME}:5433/qasip_hub"
                         set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
-                        if "${params.LLM_PROVIDER}" == "azure_openai" (
+                        if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
                             set "QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY%"
                         ) else (
                             set "QASIP_HUB_OPENAI_API_KEY=%KH_LLM_API_KEY%"
                         )
 
-                        cd /d "${env.HUB_BACKEND_DIR}"
+                        cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                         call .venv\\Scripts\\activate.bat
 
                         alembic upgrade heads
@@ -562,43 +483,43 @@ pipeline {
                         setlocal EnableDelayedExpansion
 
                         echo ========================================
-                        echo Configuring ${env.BACKEND_SERVICE_NAME} service
+                        echo Configuring ${env.KNOWLEDGE_HUB_SERVICE_NAME} service
                         echo ========================================
 
-                        if not exist "${env.BACKEND_LOG_DIR}" mkdir "${env.BACKEND_LOG_DIR}"
+                        if not exist "${env.KNOWLEDGE_HUB_LOG_DIR}" mkdir "${env.KNOWLEDGE_HUB_LOG_DIR}"
 
-                        sc query "${env.BACKEND_SERVICE_NAME}" >nul 2>&1
+                        sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" >nul 2>&1
                         if !ERRORLEVEL! NEQ 0 (
                             echo Creating NSSM service...
-                            nssm install "${env.BACKEND_SERVICE_NAME}" "${env.VENV_DIR}\\Scripts\\uvicorn.exe"
+                            nssm install "${env.KNOWLEDGE_HUB_SERVICE_NAME}" "${env.KNOWLEDGE_HUB_VENV_DIR}\\Scripts\\uvicorn.exe"
                             if !ERRORLEVEL! NEQ 0 (
                                 echo ERROR: Failed to create service - is NSSM installed?
                                 exit /b 1
                             )
                         )
 
-                        nssm set "${env.BACKEND_SERVICE_NAME}" Application "${env.VENV_DIR}\\Scripts\\uvicorn.exe"
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppDirectory "${env.HUB_BACKEND_DIR}"
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppParameters "qasip_hub.main:app --host ${env.QASIP_HUB_HOST} --port ${env.QASIP_HUB_PORT} --workers 2"
-                        nssm set "${env.BACKEND_SERVICE_NAME}" DisplayName "QASIP Knowledge Hub Backend"
-                        nssm set "${env.BACKEND_SERVICE_NAME}" Description "Knowledge Hub backend (uvicorn qasip_hub.main:app, port ${env.QASIP_HUB_PORT})"
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppStdout "${env.BACKEND_LOG_DIR}\\stdout.log"
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppStderr "${env.BACKEND_LOG_DIR}\\stderr.log"
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppRotateFiles 1
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppRotateBytes 10485760
-                        nssm set "${env.BACKEND_SERVICE_NAME}" Start SERVICE_AUTO_START
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppExit Default Restart
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" Application "${env.KNOWLEDGE_HUB_VENV_DIR}\\Scripts\\uvicorn.exe"
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppDirectory "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppParameters "qasip_hub.main:app --host ${env.QASIP_HUB_HOST} --port ${env.QASIP_HUB_PORT} --workers 2"
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" DisplayName "QASIP Knowledge Hub Backend"
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" Description "Knowledge Hub backend (uvicorn qasip_hub.main:app, port ${env.QASIP_HUB_PORT})"
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppStdout "${env.KNOWLEDGE_HUB_LOG_DIR}\\stdout.log"
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppStderr "${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log"
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppRotateFiles 1
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppRotateBytes 10485760
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" Start SERVICE_AUTO_START
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppExit Default Restart
 
                         echo Setting QASIP_HUB_* environment for the service...
 
-                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.TARGET_HOSTNAME}:5433/qasip_hub"
-                        if "${params.LLM_PROVIDER}" == "azure_openai" (
+                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_HOSTNAME}:5433/qasip_hub"
+                        if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
                             set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY%"
                         ) else (
                             set "KH_LLM_ENV=QASIP_HUB_OPENAI_API_KEY=%KH_LLM_API_KEY%"
                         )
 
-                        nssm set "${env.BACKEND_SERVICE_NAME}" AppEnvironmentExtra ^
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppEnvironmentExtra ^
                             "QASIP_HUB_DATABASE_URL=!KH_DB_URL!" ^
                             "QASIP_HUB_HOST=${env.QASIP_HUB_HOST}" ^
                             "QASIP_HUB_PORT=${env.QASIP_HUB_PORT}" ^
@@ -639,12 +560,12 @@ pipeline {
                     @echo off
                     setlocal EnableDelayedExpansion
 
-                    echo Starting ${env.BACKEND_SERVICE_NAME}...
-                    net start "${env.BACKEND_SERVICE_NAME}"
+                    echo Starting ${env.KNOWLEDGE_HUB_SERVICE_NAME}...
+                    net start "${env.KNOWLEDGE_HUB_SERVICE_NAME}"
                     if %ERRORLEVEL% NEQ 0 (
-                        echo ERROR: Failed to start ${env.BACKEND_SERVICE_NAME}
+                        echo ERROR: Failed to start ${env.KNOWLEDGE_HUB_SERVICE_NAME}
                         echo ---- last backend stderr log ----
-                        type "${env.BACKEND_LOG_DIR}\\stderr.log" 2>nul
+                        type "${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log" 2>nul
                         exit /b 1
                     )
 
@@ -665,9 +586,9 @@ pipeline {
                     if !KH_HEALTHY! EQU 0 (
                         echo ERROR: Backend did not become healthy on port ${env.QASIP_HUB_PORT}
                         echo ---- backend stderr log ----
-                        type "${env.BACKEND_LOG_DIR}\\stderr.log" 2>nul
+                        type "${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log" 2>nul
                         echo ---- backend stdout log ----
-                        type "${env.BACKEND_LOG_DIR}\\stdout.log" 2>nul
+                        type "${env.KNOWLEDGE_HUB_LOG_DIR}\\stdout.log" 2>nul
                         exit /b 1
                     )
 
@@ -695,52 +616,7 @@ pipeline {
             }
         }
 
-        // ------------------------------------------------------------------
-        stage('Create Tenant (optional)') {
-            when {
-                expression { params.CREATE_TENANT }
-            }
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'knowledgehub-db-credentials',
-                        usernameVariable: 'KH_DB_USER',
-                        passwordVariable: 'KH_DB_PASSWORD'
-                    ),
-                    string(
-                        credentialsId: 'knowledgehub-openai-api-key',
-                        variable: 'KH_LLM_API_KEY'
-                    ),
-                    string(
-                        credentialsId: 'knowledgehub-qdrant-api-key',
-                        variable: 'QASIP_HUB_QDRANT_API_KEY'
-                    )
-                ]) {
-                    bat """
-                        @echo off
-                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.TARGET_HOSTNAME}:5433/qasip_hub"
-                        set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
-
-                        cd /d "${env.HUB_BACKEND_DIR}"
-                        call .venv\\Scripts\\activate.bat
-
-                        echo Creating tenant: ${params.TENANT_NAME}
-                        qasip-hub-create-tenant --name "${params.TENANT_NAME}"
-                        if %ERRORLEVEL% NEQ 0 (
-                            echo ERROR: Tenant creation failed
-                            exit /b 1
-                        )
-                        echo Tenant created.
-                    """
-                }
-            }
-        }
-
-        // ------------------------------------------------------------------
         stage('Build Frontend (Node 18)') {
-            when {
-                expression { params.DEPLOY_FRONTEND }
-            }
             steps {
                 bat """
                     @echo off
@@ -749,24 +625,24 @@ pipeline {
                     echo Building Knowledge Hub admin frontend
                     echo ========================================
 
-                    if not exist "${env.NODE18_DIR}\\npm.cmd" (
-                        echo ERROR: Node 18 not found at ${env.NODE18_DIR}
+                    if not exist "${env.KNOWLEDGE_HUB_NODE18_DIR}\\npm.cmd" (
+                        echo ERROR: Node 18 not found at ${env.KNOWLEDGE_HUB_NODE18_DIR}
                         echo Run Ansible provisioning first ^(node18 role^).
                         echo NOTE: plain node/npm on this host is Node 10 and cannot build this app.
                         exit /b 1
                     )
 
                     rem Node 18 first in PATH for THIS build only - Node 10 stays the system default.
-                    set "PATH=${env.NODE18_DIR};%PATH%"
+                    set "PATH=${env.KNOWLEDGE_HUB_NODE18_DIR};%PATH%"
                     node -v
                     npm -v
 
-                    if not exist "${env.HUB_FRONTEND_DIR}" (
-                        echo ERROR: Frontend code not found at ${env.HUB_FRONTEND_DIR}
+                    if not exist "${env.KNOWLEDGE_HUB_FRONTEND_DIR}" (
+                        echo ERROR: Frontend code not found at ${env.KNOWLEDGE_HUB_FRONTEND_DIR}
                         exit /b 1
                     )
 
-                    cd /d "${env.HUB_FRONTEND_DIR}"
+                    cd /d "${env.KNOWLEDGE_HUB_FRONTEND_DIR}"
 
                     set "VITE_HUB_API_URL=${env.VITE_HUB_API_URL}"
                     echo VITE_HUB_API_URL=%VITE_HUB_API_URL%
@@ -801,9 +677,6 @@ pipeline {
 
         // ------------------------------------------------------------------
         stage('Publish Frontend to Nginx') {
-            when {
-                expression { params.DEPLOY_FRONTEND }
-            }
             steps {
                 bat """
                     @echo off
@@ -813,15 +686,15 @@ pipeline {
                     echo Publishing frontend to Nginx (subfolder only)
                     echo ========================================
 
-                    set "KH_UI_TARGET=${params.NGINX_HTML_DIR}\\${params.ADMIN_UI_PATH}"
-                    set "KH_UI_BACKUP=${params.NGINX_HTML_DIR}\\${params.ADMIN_UI_PATH}_backup_${BUILD_NUMBER}"
+                    set "KH_UI_TARGET=${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}"
+                    set "KH_UI_BACKUP=${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}_backup_${BUILD_NUMBER}"
 
-                    if not exist "${params.NGINX_HTML_DIR}" (
-                        echo ERROR: Nginx html dir not found: ${params.NGINX_HTML_DIR}
+                    if not exist "${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}" (
+                        echo ERROR: Nginx html dir not found: ${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}
                         exit /b 1
                     )
 
-                    echo Existing Angular UI in ${params.NGINX_HTML_DIR} is NOT touched.
+                    echo Existing Angular UI in ${env.KNOWLEDGE_HUB_NGINX_HTML_DIR} is NOT touched.
                     echo Knowledge Hub UI target: %KH_UI_TARGET%
 
                     if exist "%KH_UI_TARGET%" (
@@ -831,7 +704,7 @@ pipeline {
 
                     if not exist "%KH_UI_TARGET%" mkdir "%KH_UI_TARGET%"
 
-                    robocopy "${env.HUB_FRONTEND_DIR}\\dist" "%KH_UI_TARGET%" /MIR >nul
+                    robocopy "${env.KNOWLEDGE_HUB_FRONTEND_DIR}\\dist" "%KH_UI_TARGET%" /MIR >nul
                     if %ERRORLEVEL% GEQ 8 (
                         echo ERROR: Failed to publish dist to %KH_UI_TARGET% ^(robocopy code %ERRORLEVEL%^)
                         exit /b 1
@@ -844,9 +717,9 @@ pipeline {
                     echo IMPORTANT - Nginx must serve this subfolder with SPA fallback.
                     echo Add ^(once, in the Nginx server block for the admin-ui domain^):
                     echo.
-                    echo     location /${params.ADMIN_UI_PATH}/ {
-                    echo         alias ${params.NGINX_HTML_DIR}\\${params.ADMIN_UI_PATH}\\;
-                    echo         try_files \$uri \$uri/ /${params.ADMIN_UI_PATH}/index.html;
+                    echo     location /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/ {
+                    echo         alias ${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}\\;
+                    echo         try_files \$uri \$uri/ /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/index.html;
                     echo     }
                     echo.
                     echo Then reload Nginx:  nginx.exe -s reload  ^(from the Nginx root dir^)
@@ -865,12 +738,12 @@ pipeline {
                     echo Final verification
                     echo ========================================
 
-                    sc query "${env.BACKEND_SERVICE_NAME}" | findstr "RUNNING" >nul
+                    sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" | findstr "RUNNING" >nul
                     if %ERRORLEVEL% NEQ 0 (
-                        echo ERROR: ${env.BACKEND_SERVICE_NAME} is not RUNNING
+                        echo ERROR: ${env.KNOWLEDGE_HUB_SERVICE_NAME} is not RUNNING
                         exit /b 1
                     )
-                    echo [OK] Backend service ${env.BACKEND_SERVICE_NAME} is RUNNING
+                    echo [OK] Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is RUNNING
 
                     curl.exe --fail --silent http://localhost:${env.QASIP_HUB_PORT}/health >nul
                     if %ERRORLEVEL% NEQ 0 (
@@ -889,17 +762,11 @@ pipeline {
                     curl.exe --fail --silent ${env.QASIP_HUB_CORS_ORIGINS} >nul
                     if %ERRORLEVEL% NEQ 0 (
                         echo ERROR: Admin UI not reachable at ${env.QASIP_HUB_CORS_ORIGINS}
-                        echo Check the Nginx location for /${params.ADMIN_UI_PATH}/ and DNS.
+                        echo Check the Nginx location for /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/ and DNS.
                         exit /b 1
                     )
                     echo [OK] Admin UI reachable: ${env.QASIP_HUB_CORS_ORIGINS}
                     echo Manual check: open ${env.QASIP_HUB_CORS_ORIGINS} and confirm API calls go to ${env.QASIP_HUB_PUBLIC_URL}
-
-                    if not "${params.TENANT_ID}" == "" (
-                        echo Checking SSE endpoint /mcp/stream ^(informational - SSE stays open, a timeout here is expected^)...
-                        curl.exe --silent --max-time 10 -o nul -w "SSE HTTP status: %%{http_code}\\n" "http://localhost:${env.QASIP_HUB_PORT}/mcp/stream?tenant=${params.TENANT_ID}"
-                        echo [INFO] SSE check done - verify live streaming manually with a real tenant session if needed.
-                    )
 
                     echo All deployment checks passed.
                 """
@@ -916,10 +783,10 @@ pipeline {
             ====================================================
 
             Target Machine  : ${params.PROJECT_TARGET_MACHINE}
-            Backend Service : ${env.BACKEND_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
+            Backend Service : ${env.KNOWLEDGE_HUB_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
             Backend Health  : http://localhost:${env.QASIP_HUB_PORT}/health
             API Domain      : ${env.QASIP_HUB_PUBLIC_URL}
-            Admin UI Domain : ${env.QASIP_HUB_CORS_ORIGINS} (path: /${params.ADMIN_UI_PATH}/)
+            Admin UI Domain : ${env.QASIP_HUB_CORS_ORIGINS} (path: /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/)
 
             ====================================================
             """
@@ -935,8 +802,8 @@ pipeline {
 
             Check the Jenkins console log above for the failing stage.
             Backend logs on the target:
-              ${env.BACKEND_LOG_DIR}\\stdout.log
-              ${env.BACKEND_LOG_DIR}\\stderr.log
+              ${env.KNOWLEDGE_HUB_LOG_DIR}\\stdout.log
+              ${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log
 
             ====================================================
             """
