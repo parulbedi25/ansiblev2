@@ -16,6 +16,18 @@ pg14_roles:
   - "app"
   - "report"
 
+# Knowledge Hub application database user (used by Alembic + the Hub API).
+# The role ensures this LOGIN role exists and has USAGE+CREATE on schema
+# public in pg14_hub_db_name - since PostgreSQL 15 the public schema no
+# longer grants CREATE to PUBLIC, so without this grant Alembic fails with
+# "permission denied for schema public". Set pg14_hub_db_password in
+# secrets.yml to also manage the password (it must then match the Jenkins
+# credential 'knowledgehub-db-credentials'); leave empty to only ensure
+# the role + grants and never touch the password.
+pg14_hub_db_name: "qasip_hub"
+pg14_hub_db_user: "kh_app"
+pg14_hub_db_password: ""
+
 # pgAdmin - the LATEST standalone pgAdmin 4 from postgresql.org.
 # The pgAdmin bundled with old EDB installs crashes with a fatal error, so
 # this role installs/upgrades pgAdmin separately to the version below.
