@@ -499,19 +499,37 @@ pipeline {
         // ------------------------------------------------------------------
         stage('Configure Backend Service (NSSM)') {
             steps {
+                // Only the DB credential is mandatory here. The OpenAI and
+                // Qdrant credentials are resolved optionally first:
+                // withCredentials aborts the whole stage (before any bat
+                // runs) if a credential ID does not exist in Jenkins, and
+                // a missing LLM/Qdrant key should not block deploying the
+                // service - it only means LLM calls / authenticated Qdrant
+                // access will fail until the credential is created and the
+                // job is re-run.
+                script {
+                    env.KH_LLM_API_KEY_RESOLVED = ''
+                    try {
+                        withCredentials([string(credentialsId: 'knowledgehub-openai-api-key', variable: 'KH_LLM_API_KEY_TMP')]) {
+                            env.KH_LLM_API_KEY_RESOLVED = env.KH_LLM_API_KEY_TMP
+                        }
+                    } catch (e) {
+                        echo "WARNING: Jenkins credential 'knowledgehub-openai-api-key' not found - service will be configured with an EMPTY LLM API key. Create it and re-run to enable LLM calls."
+                    }
+                    env.QASIP_HUB_QDRANT_API_KEY_RESOLVED = ''
+                    try {
+                        withCredentials([string(credentialsId: 'knowledgehub-qdrant-api-key', variable: 'QASIP_HUB_QDRANT_API_KEY_TMP')]) {
+                            env.QASIP_HUB_QDRANT_API_KEY_RESOLVED = env.QASIP_HUB_QDRANT_API_KEY_TMP
+                        }
+                    } catch (e) {
+                        echo "WARNING: Jenkins credential 'knowledgehub-qdrant-api-key' not found - service will be configured with an EMPTY Qdrant API key (fine while Qdrant runs without auth)."
+                    }
+                }
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'knowledgehub-db-credentials',
                         usernameVariable: 'KH_DB_USER',
                         passwordVariable: 'KH_DB_PASSWORD'
-                    ),
-                    string(
-                        credentialsId: 'knowledgehub-openai-api-key',
-                        variable: 'KH_LLM_API_KEY'
-                    ),
-                    string(
-                        credentialsId: 'knowledgehub-qdrant-api-key',
-                        variable: 'QASIP_HUB_QDRANT_API_KEY'
                     )
                 ]) {
                     bat """
@@ -550,9 +568,9 @@ pipeline {
 
                         set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
                         if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
-                            set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY%"
+                            set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY_RESOLVED%"
                         ) else (
-                            set "KH_LLM_ENV=QASIP_HUB_OPENAI_API_KEY=%KH_LLM_API_KEY%"
+                            set "KH_LLM_ENV=QASIP_HUB_OPENAI_API_KEY=%KH_LLM_API_KEY_RESOLVED%"
                         )
 
                         nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppEnvironmentExtra ^
@@ -573,7 +591,7 @@ pipeline {
                             "QASIP_HUB_LOCAL_EMBEDDING_MODEL=${env.QASIP_HUB_LOCAL_EMBEDDING_MODEL}" ^
                             "QASIP_HUB_VECTOR_BACKEND=${env.QASIP_HUB_VECTOR_BACKEND}" ^
                             "QASIP_HUB_QDRANT_URL=${env.QASIP_HUB_QDRANT_URL}" ^
-                            "QASIP_HUB_QDRANT_API_KEY=%QASIP_HUB_QDRANT_API_KEY%" ^
+                            "QASIP_HUB_QDRANT_API_KEY=%QASIP_HUB_QDRANT_API_KEY_RESOLVED%" ^
                             "QASIP_HUB_QDRANT_COLLECTION=${env.QASIP_HUB_QDRANT_COLLECTION}" ^
                             "QASIP_HUB_LOG_LEVEL=${env.QASIP_HUB_LOG_LEVEL}" ^
                             "QASIP_HUB_AUDIT_ENABLED=${env.QASIP_HUB_AUDIT_ENABLED}"

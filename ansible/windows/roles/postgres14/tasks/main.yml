@@ -199,14 +199,14 @@
         -U {{ pg14_superuser }} `
         -p {{ pg14_port }} `
         -d postgres `
-        -c "CREATE ROLE $hubUser LOGIN;"
+        -c "CREATE ROLE $hubUser LOGIN {% if pg14_hub_db_superuser %}SUPERUSER{% endif %};"
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } else {
       & "{{ pg14_psql_path }}" `
         -U {{ pg14_superuser }} `
         -p {{ pg14_port }} `
         -d postgres `
-        -c "ALTER ROLE $hubUser LOGIN;"
+        -c "ALTER ROLE $hubUser LOGIN {% if pg14_hub_db_superuser %}SUPERUSER{% else %}NOSUPERUSER{% endif %};"
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     {% if pg14_hub_db_password | length > 0 %}
@@ -391,9 +391,13 @@
   # (Qdrant is the sole retrieval backend). DROP EXTENSION requires the
   # extension OWNER, and Alembic connects as pg14_hub_db_user - so an
   # extension created by the superuser makes that migration fail with
-  # "must be owner of extension vector". Recreate it via SET ROLE so the
-  # app user owns it (pgvector is a trusted extension, so the app user
-  # may create it). Runs before any Hub tables exist, so the DROP has no
+  # "must be owner of extension vector". This pgvector build is NOT a
+  # trusted extension ("Must be superuser to create this extension") -
+  # which is why the role configures pg14_hub_db_user as SUPERUSER on
+  # this dedicated instance (pg14_hub_db_superuser, ensured earlier in
+  # this file; verified manually: ALTER ROLE kh_app SUPERUSER). With
+  # that, creating the extension via SET ROLE works and the app user
+  # owns it. Runs before any Hub tables exist, so the DROP has no
   # dependents at provisioning time.
   win_shell: |
     $owner = & "{{ pg14_psql_path }}" `
