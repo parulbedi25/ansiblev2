@@ -284,7 +284,10 @@ pipeline {
                     call .venv\\Scripts\\activate.bat
 
                     python --version
-                    pip install --upgrade pip
+                    rem Use python -m pip for the self-upgrade: pip.exe cannot
+                    rem replace itself while running on Windows ("To modify
+                    rem pip, please run ... python.exe -m pip install ...").
+                    python -m pip install --upgrade pip
                     if %ERRORLEVEL% NEQ 0 (
                         echo ERROR: pip upgrade failed
                         exit /b 1
