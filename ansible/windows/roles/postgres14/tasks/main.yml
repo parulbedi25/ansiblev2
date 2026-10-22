@@ -391,10 +391,13 @@
   # (Qdrant is the sole retrieval backend). DROP EXTENSION requires the
   # extension OWNER, and Alembic connects as pg14_hub_db_user - so an
   # extension created by the superuser makes that migration fail with
-  # "must be owner of extension vector". Recreate it via SET ROLE so the
-  # app user owns it (pgvector is a trusted extension, so the app user
-  # may create it). Runs before any Hub tables exist, so the DROP has no
-  # dependents at provisioning time.
+  # "must be owner of extension vector". This pgvector build is NOT a
+  # trusted extension ("Must be superuser to create this extension"), so
+  # plain SET ROLE creation is rejected. Instead: make the app user
+  # TEMPORARILY superuser, create the extension via SET ROLE so the app
+  # user owns it, and remove superuser again in a finally block so the
+  # privilege is dropped even if creation fails. Runs before any Hub
+  # tables exist, so the DROP has no dependents at provisioning time.
   win_shell: |
     $owner = & "{{ pg14_psql_path }}" `
       -U {{ pg14_superuser }} `
@@ -414,9 +417,24 @@
       & "{{ pg14_psql_path }}" `
         -U {{ pg14_superuser }} `
         -p {{ pg14_port }} `
-        -d {{ pg14_hub_db_name }} `
-        -c "SET ROLE {{ pg14_hub_db_user }}; CREATE EXTENSION vector;"
+        -d postgres `
+        -c "ALTER ROLE {{ pg14_hub_db_user }} SUPERUSER;"
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      try {
+        & "{{ pg14_psql_path }}" `
+          -U {{ pg14_superuser }} `
+          -p {{ pg14_port }} `
+          -d {{ pg14_hub_db_name }} `
+          -c "SET ROLE {{ pg14_hub_db_user }}; CREATE EXTENSION vector;"
+        $createRc = $LASTEXITCODE
+      } finally {
+        & "{{ pg14_psql_path }}" `
+          -U {{ pg14_superuser }} `
+          -p {{ pg14_port }} `
+          -d postgres `
+          -c "ALTER ROLE {{ pg14_hub_db_user }} NOSUPERUSER;"
+      }
+      if ($createRc -ne 0) { exit $createRc }
     }
   environment:
     PGPASSWORD: "{{ pg14_superuser_password }}"
