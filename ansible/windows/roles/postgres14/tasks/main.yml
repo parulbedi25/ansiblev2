@@ -185,6 +185,54 @@
     PGPASSWORD: "{{ pg14_superuser_password }}"
   loop: "{{ pg14_db_names }}"
   changed_when: false
+- name: Ensure Knowledge Hub DB user exists with schema grants (Alembic needs CREATE on public)
+  win_shell: |
+    $hubUser = "{{ pg14_hub_db_user }}"
+    $hubDb   = "{{ pg14_hub_db_name }}"
+    $exists = & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d postgres `
+      -tAc "SELECT 1 FROM pg_roles WHERE rolname='$hubUser'"
+    if (-not $exists) {
+      & "{{ pg14_psql_path }}" `
+        -U {{ pg14_superuser }} `
+        -p {{ pg14_port }} `
+        -d postgres `
+        -c "CREATE ROLE $hubUser LOGIN;"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } else {
+      & "{{ pg14_psql_path }}" `
+        -U {{ pg14_superuser }} `
+        -p {{ pg14_port }} `
+        -d postgres `
+        -c "ALTER ROLE $hubUser LOGIN;"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    {% if pg14_hub_db_password | length > 0 %}
+    $hubPwd = "{{ pg14_hub_db_password }}" -replace "'", "''"
+    & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d postgres `
+      -c "ALTER ROLE $hubUser WITH PASSWORD '$hubPwd';"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    {% endif %}
+    & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d postgres `
+      -c "GRANT ALL PRIVILEGES ON DATABASE $hubDb TO $hubUser;"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d $hubDb `
+      -c "GRANT USAGE, CREATE ON SCHEMA public TO $hubUser;"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
+  changed_when: false
 - name: Create PostgreSQL 18 required roles
   win_shell: |
     $roles = ConvertFrom-Json '{{ pg14_roles | to_json }}'
