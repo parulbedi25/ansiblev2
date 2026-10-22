@@ -251,6 +251,25 @@ pipeline {
 
                     cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
 
+                    rem An existing .venv is only reusable if it is Python 3.12.
+                    rem A venv created with the system python (3.11) makes
+                    rem "pip install -e ." fail with:
+                    rem   Package 'qasip-hub' requires a different Python: 3.11.x not in '>=3.12'
+                    if exist ".venv\\Scripts\\python.exe" (
+                        ".venv\\Scripts\\python.exe" --version > "%TEMP%\\kh_venv_version.txt" 2>&1
+                        findstr /C:"Python 3.12" "%TEMP%\\kh_venv_version.txt" >nul
+                        if errorlevel 1 (
+                            echo Existing .venv is NOT Python 3.12:
+                            type "%TEMP%\\kh_venv_version.txt"
+                            echo Deleting it and recreating with Python 3.12...
+                            rmdir /S /Q ".venv"
+                            if exist ".venv" (
+                                echo ERROR: Failed to delete the old .venv - is it in use by a running process?
+                                exit /b 1
+                            )
+                        )
+                    )
+
                     if not exist ".venv\\Scripts\\python.exe" (
                         echo python -m venv .venv
                         "${env.KNOWLEDGE_HUB_PYTHON_EXE}" -m venv .venv
@@ -259,11 +278,16 @@ pipeline {
                             exit /b 1
                         )
                     ) else (
-                        echo Virtual environment already exists - reusing it.
+                        echo Virtual environment already exists ^(Python 3.12^) - reusing it.
                     )
 
                     call .venv\\Scripts\\activate.bat
                     python --version
+                    python -c "import sys; assert sys.version_info[:2]==(3,12), 'venv Python is not 3.12: '+sys.version"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: venv Python version check failed
+                        exit /b 1
+                    )
                     echo Virtual environment ready: %VIRTUAL_ENV%
                 """
             }
@@ -284,6 +308,11 @@ pipeline {
                     call .venv\\Scripts\\activate.bat
 
                     python --version
+                    python -c "import sys; assert sys.version_info[:2]==(3,12), 'venv Python is not 3.12: '+sys.version"
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: This stage must run in the Python 3.12 venv - qasip-hub requires Python ^>=3.12
+                        exit /b 1
+                    )
                     rem Use python -m pip for the self-upgrade: pip.exe cannot
                     rem replace itself while running on Windows ("To modify
                     rem pip, please run ... python.exe -m pip install ...").
