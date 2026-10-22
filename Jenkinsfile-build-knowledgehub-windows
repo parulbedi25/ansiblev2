@@ -223,6 +223,11 @@ pipeline {
                     )
                     echo NOTE: only the Knowledge Hub service is stopped. Other Python
                     echo services (eg ATMS-Python-AI) are deliberately NOT touched.
+                    rem sc query above leaves ERRORLEVEL=1060 when the service does
+                    rem not exist, and ECHO/IF do not reset it - without this line
+                    rem the bat step would end with 1060 and Jenkins would fail
+                    rem this stage even though skipping is the correct outcome.
+                    exit /b 0
                 """
             }
         }
@@ -260,6 +265,42 @@ pipeline {
                     call .venv\\Scripts\\activate.bat
                     python --version
                     echo Virtual environment ready: %VIRTUAL_ENV%
+                """
+            }
+        }
+
+        // ------------------------------------------------------------------
+        stage('Setup Backend Environment') {
+            steps {
+                bat """
+                    @echo off
+                    setlocal
+
+                    echo ========================================
+                    echo Installing Knowledge Hub backend
+                    echo ========================================
+
+                    cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
+                    call .venv\\Scripts\\activate.bat
+
+                    python --version
+                    rem Use python -m pip for the self-upgrade: pip.exe cannot
+                    rem replace itself while running on Windows ("To modify
+                    rem pip, please run ... python.exe -m pip install ...").
+                    python -m pip install --upgrade pip
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: pip upgrade failed
+                        exit /b 1
+                    )
+
+                    echo Installing Knowledge Hub backend ^(pip install -e .^)...
+                    pip install -e .
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo ERROR: pip install -e . failed
+                        exit /b 1
+                    )
+
+                    echo Backend environment ready.
                 """
             }
         }
@@ -354,39 +395,6 @@ pipeline {
         }
 
         // ------------------------------------------------------------------
-        stage('Setup Backend Environment') {
-            steps {
-                bat """
-                    @echo off
-                    setlocal
-
-                    echo ========================================
-                    echo Installing Knowledge Hub backend
-                    echo ========================================
-
-                    cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
-                    call .venv\\Scripts\\activate.bat
-
-                    python --version
-                    pip install --upgrade pip
-                    if %ERRORLEVEL% NEQ 0 (
-                        echo ERROR: pip upgrade failed
-                        exit /b 1
-                    )
-
-                    echo Installing Knowledge Hub backend ^(pip install -e .^)...
-                    pip install -e .
-                    if %ERRORLEVEL% NEQ 0 (
-                        echo ERROR: pip install -e . failed
-                        exit /b 1
-                    )
-
-                    echo Backend environment ready.
-                """
-            }
-        }
-
-        // ------------------------------------------------------------------
         stage('Verify Adapters') {
             steps {
                 bat """
@@ -408,6 +416,10 @@ pipeline {
                         exit /b 1
                     )
                     echo Adapters verified.
+                    rem findstr above returns ERRORLEVEL=1 when "[]" is NOT found
+                    rem (the success case) and ECHO does not reset it - end the
+                    rem bat step explicitly with success.
+                    exit /b 0
                 """
             }
         }
