@@ -456,19 +456,16 @@ pipeline {
         // ------------------------------------------------------------------
         stage('Apply Database Migrations') {
             steps {
+                // Only the DB credential is bound here. Binding the LLM /
+                // Qdrant credentials in this stage made migrations fail
+                // inside withCredentials (before any bat ran) whenever one
+                // of those unrelated credentials was missing in Jenkins.
+                // Alembic only needs DATABASE_URL + the generated SECRET_KEY.
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'knowledgehub-db-credentials',
                         usernameVariable: 'KH_DB_USER',
                         passwordVariable: 'KH_DB_PASSWORD'
-                    ),
-                    string(
-                        credentialsId: 'knowledgehub-openai-api-key',
-                        variable: 'KH_LLM_API_KEY'
-                    ),
-                    string(
-                        credentialsId: 'knowledgehub-qdrant-api-key',
-                        variable: 'QASIP_HUB_QDRANT_API_KEY'
                     )
                 ]) {
                     bat """
@@ -480,11 +477,6 @@ pipeline {
 
                         set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_HOSTNAME}:5433/qasip_hub"
                         set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
-                        if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
-                            set "QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY%"
-                        ) else (
-                            set "QASIP_HUB_OPENAI_API_KEY=%KH_LLM_API_KEY%"
-                        )
 
                         cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                         call .venv\\Scripts\\activate.bat
