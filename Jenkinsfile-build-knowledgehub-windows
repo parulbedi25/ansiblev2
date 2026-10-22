@@ -223,6 +223,11 @@ pipeline {
                     )
                     echo NOTE: only the Knowledge Hub service is stopped. Other Python
                     echo services (eg ATMS-Python-AI) are deliberately NOT touched.
+                    rem sc query above leaves ERRORLEVEL=1060 when the service does
+                    rem not exist, and ECHO/IF do not reset it - without this line
+                    rem the bat step would end with 1060 and Jenkins would fail
+                    rem this stage even though skipping is the correct outcome.
+                    exit /b 0
                 """
             }
         }
@@ -408,6 +413,10 @@ pipeline {
                         exit /b 1
                     )
                     echo Adapters verified.
+                    rem findstr above returns ERRORLEVEL=1 when "[]" is NOT found
+                    rem (the success case) and ECHO does not reset it - end the
+                    rem bat step explicitly with success.
+                    exit /b 0
                 """
             }
         }
