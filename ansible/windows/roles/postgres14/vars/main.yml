@@ -1,5 +1,9 @@
 ---
 # vars file for roles/postgres14
+# Major version derived from pg14_version ("18.6-5" -> "18") - used by the
+# pgvector build script template; keep it derived so version bumps stay
+# a one-variable change in defaults.
+pg14_major_version: "{{ pg14_version.split('.')[0] }}"
 pg14_installer: "postgresql-{{ pg14_version }}-windows-x64.exe"
 pg14_url: "https://get.enterprisedb.com/postgresql/{{ pg14_installer }}"
 pg14_temp_dir: "D:\\temp"
