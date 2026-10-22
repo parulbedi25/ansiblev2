@@ -374,7 +374,7 @@
       win_command: 'cmd.exe /c "{{ pg14_temp_dir }}\\build_pgvector.bat"'
       register: pg14_pgvector_build
 
-- name: Create pgvector extension in PostgreSQL 18 databases
+- name: Create pgvector extension in PostgreSQL 18 databases (except the Hub DB)
   win_shell: |
     & "{{ pg14_psql_path }}" `
       -U {{ pg14_superuser }} `
@@ -383,7 +383,43 @@
       -c "CREATE EXTENSION IF NOT EXISTS vector;"
   environment:
     PGPASSWORD: "{{ pg14_superuser_password }}"
-  loop: "{{ pg14_db_names }}"
+  loop: "{{ pg14_db_names | difference([pg14_hub_db_name]) }}"
+  changed_when: false
+  when: pg14_pgvector_enabled | bool
+- name: Ensure pgvector extension in Hub DB is owned by the Hub app user
+  # The Hub's Alembic migration 0017 runs DROP EXTENSION IF EXISTS vector
+  # (Qdrant is the sole retrieval backend). DROP EXTENSION requires the
+  # extension OWNER, and Alembic connects as pg14_hub_db_user - so an
+  # extension created by the superuser makes that migration fail with
+  # "must be owner of extension vector". Recreate it via SET ROLE so the
+  # app user owns it (pgvector is a trusted extension, so the app user
+  # may create it). Runs before any Hub tables exist, so the DROP has no
+  # dependents at provisioning time.
+  win_shell: |
+    $owner = & "{{ pg14_psql_path }}" `
+      -U {{ pg14_superuser }} `
+      -p {{ pg14_port }} `
+      -d {{ pg14_hub_db_name }} `
+      -tAc "SELECT pg_get_userbyid(extowner) FROM pg_extension WHERE extname='vector'"
+    if ($owner -and ($owner.Trim() -ne "{{ pg14_hub_db_user }}")) {
+      & "{{ pg14_psql_path }}" `
+        -U {{ pg14_superuser }} `
+        -p {{ pg14_port }} `
+        -d {{ pg14_hub_db_name }} `
+        -c "DROP EXTENSION vector;"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      $owner = $null
+    }
+    if (-not $owner) {
+      & "{{ pg14_psql_path }}" `
+        -U {{ pg14_superuser }} `
+        -p {{ pg14_port }} `
+        -d {{ pg14_hub_db_name }} `
+        -c "SET ROLE {{ pg14_hub_db_user }}; CREATE EXTENSION vector;"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+  environment:
+    PGPASSWORD: "{{ pg14_superuser_password }}"
   changed_when: false
   when: pg14_pgvector_enabled | bool
 - name: Verify pgvector extension is enabled
