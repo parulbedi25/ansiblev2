@@ -30,7 +30,10 @@
  * file, so this pipeline derives the target hostname itself at runtime
  * (KNOWLEDGE_HUB_HOSTNAME = <project>.qajarvis.com, project = first part of
  * PROJECT_TARGET_MACHINE) and fills QASIP_HUB_PUBLIC_URL, CORS_ORIGINS,
- * QDRANT_URL, the DATABASE_URL host and VITE_HUB_API_URL from it.
+ * and VITE_HUB_API_URL from it. Internal services on the same machine
+ * (PostgreSQL :5433, Qdrant :6333) deliberately use localhost: PG's
+ * default pg_hba.conf only allows loopback, so connecting via the
+ * hostname (= LAN IP) is rejected with "no pg_hba.conf entry".
  *
  * Frontend is published into a SUBFOLDER of the existing Nginx html dir
  * (default: knowledge-hub) so the existing Angular UI hosted there is never
@@ -114,7 +117,7 @@ pipeline {
         QASIP_HUB_EMBEDDING_PROVIDER   = 'local'
         QASIP_HUB_LOCAL_EMBEDDING_MODEL = 'BAAI/bge-small-en-v1.5'
         QASIP_HUB_VECTOR_BACKEND       = 'qdrant'
-        QASIP_HUB_QDRANT_URL           = "http://${KNOWLEDGE_HUB_HOSTNAME}:6333"
+        QASIP_HUB_QDRANT_URL           = 'http://localhost:6333'
         QASIP_HUB_QDRANT_COLLECTION    = 'ku_index'
         QASIP_HUB_LOG_LEVEL            = 'INFO'
         QASIP_HUB_AUDIT_ENABLED        = 'true'
@@ -177,7 +180,7 @@ pipeline {
                     echo   QASIP_HUB_PUBLIC_URL  = ${env.QASIP_HUB_PUBLIC_URL}
                     echo   QASIP_HUB_CORS_ORIGINS= ${env.QASIP_HUB_CORS_ORIGINS}
                     echo   QASIP_HUB_QDRANT_URL  = ${env.QASIP_HUB_QDRANT_URL}
-                    echo   DATABASE host         = ${env.KNOWLEDGE_HUB_HOSTNAME}:5433
+                    echo   DATABASE host         = localhost:5433 (same machine - pg_hba only allows loopback; the hostname/LAN IP is rejected)
                     echo   VITE_HUB_API_URL      = ${env.VITE_HUB_API_URL}
                 """
             }
@@ -475,7 +478,7 @@ pipeline {
                         echo Applying database migrations (alembic)
                         echo ========================================
 
-                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_HOSTNAME}:5433/qasip_hub"
+                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
                         set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
 
                         cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
@@ -545,7 +548,7 @@ pipeline {
 
                         echo Setting QASIP_HUB_* environment for the service...
 
-                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_HOSTNAME}:5433/qasip_hub"
+                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
                         if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
                             set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY%"
                         ) else (
