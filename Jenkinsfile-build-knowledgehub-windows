@@ -54,10 +54,6 @@ pipeline {
             description: 'Jenkins agent label where the application will be deployed. Format: project-environment-ip (example: copper-dev-10.10.3.150). Ensure the label exactly matches an existing Jenkins node.'
         )
         string(
-            name: 'BUILD_VERSION',
-            description: 'Specify the build version to deploy. Required format: dd-MM-yyyy-v1.0.0-BuildNumber (example: 17-02-2026-v1.0.0-175).'
-        )
-        string(
             name: 'NOTIFICATION_EMAILS',
             defaultValue: '',
             description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
@@ -135,8 +131,6 @@ pipeline {
                 script {
                     def missing = []
                     if (!params.PROJECT_TARGET_MACHINE?.trim()) missing << 'PROJECT_TARGET_MACHINE'
-                    if (!params.BUILD_VERSION?.trim()) missing << 'BUILD_VERSION'
-                    if (params.BUILD_VERSION?.trim() && !(params.BUILD_VERSION.trim() ==~ /\d{2}-\d{2}-\d{4}-v\d+\.\d+\.\d+-\d+/)) missing << 'BUILD_VERSION format must be dd-MM-yyyy-v1.0.0-BuildNumber'
                     if (missing) {
                         error "Missing required parameters: ${missing.join(', ')}"
                     }
@@ -151,7 +145,6 @@ pipeline {
                     Frontend Dir   : ${env.KNOWLEDGE_HUB_FRONTEND_DIR}
                     Backend Service: ${env.KNOWLEDGE_HUB_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
                     LLM Provider   : ${env.QASIP_HUB_LLM_PROVIDER}
-                    Build Version  : ${params.BUILD_VERSION}
                     ========================================
                     """
                 }
@@ -694,7 +687,7 @@ pipeline {
                     echo ========================================
 
                     set "KH_UI_TARGET=${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}"
-                    set "KH_UI_BACKUP=${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}_backup_${params.BUILD_VERSION}_${BUILD_NUMBER}"
+                    set "KH_UI_BACKUP=${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}_backup_${BUILD_NUMBER}"
 
                     if not exist "${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}" (
                         echo ERROR: Nginx html dir not found: ${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}
@@ -790,7 +783,6 @@ pipeline {
             ====================================================
 
             Target Machine  : ${params.PROJECT_TARGET_MACHINE}
-            Build Version   : ${params.BUILD_VERSION}
             Backend Service : ${env.KNOWLEDGE_HUB_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
             Backend Health  : http://localhost:${env.QASIP_HUB_PORT}/health
             API Domain      : ${env.QASIP_HUB_PUBLIC_URL}
