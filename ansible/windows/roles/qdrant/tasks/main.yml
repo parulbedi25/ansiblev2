@@ -51,12 +51,34 @@
     creates: "{{ qdrant_exe }}"
   when: not qdrant_exe_check.stat.exists
 
+# qdrant_exe_check was taken BEFORE extraction, so it is stale here - always
+# re-check the disk instead of failing on the old result.
+- name: Re-check Qdrant executable after extraction
+  win_stat:
+    path: "{{ qdrant_exe }}"
+  register: qdrant_exe_after_extract
+
+- name: Move qdrant.exe into the install directory if the archive nested it
+  win_shell: |
+    $nested = Get-ChildItem -Path '{{ qdrant_install_dir }}' -Filter 'qdrant.exe' `
+      -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($nested) {
+      Copy-Item -Path (Join-Path $nested.DirectoryName '*') `
+        -Destination '{{ qdrant_install_dir }}' -Recurse -Force
+    }
+  when: not qdrant_exe_after_extract.stat.exists
+
+- name: Verify Qdrant executable is present after extraction
+  win_stat:
+    path: "{{ qdrant_exe }}"
+  register: qdrant_exe_final
+
 - name: Fail if Qdrant executable is missing after extraction
   fail:
     msg: >
       Qdrant executable not found at {{ qdrant_exe }} after extracting
       {{ qdrant_archive }}. Check that {{ qdrant_url }} is reachable.
-  when: not qdrant_exe_check.stat.exists
+  when: not qdrant_exe_final.stat.exists
 
 - name: Write Qdrant configuration (ports, persistent storage, API key)
   win_template:
