@@ -131,6 +131,17 @@
 # http://localhost:8000/ answers from the first provisioning run
 # (403 until the UI is published, instead of nginx erroring on a
 # missing root).
+- name: Confirm deployed nginx.conf contains the Knowledge Hub :8000 listener
+  win_shell: |
+    if (Select-String -Path "{{ nginx_root_path }}\\conf\\nginx.conf" -Pattern 'listen\s+8000;' -Quiet) {
+      Write-Host "OK: nginx.conf contains 'listen 8000;'"
+      exit 0
+    }
+    Write-Host "ERROR: 'listen 8000;' NOT found in {{ nginx_root_path }}\\conf\\nginx.conf - the Knowledge Hub UI server block did not deploy"
+    exit 1
+  changed_when: false
+  when: knowledge_hub_enabled | bool
+
 - name: Ensure Knowledge Hub UI root directory exists
   win_file:
     path: "{{ nginx_root_path }}\\{{ knowledge_hub_root }}"
