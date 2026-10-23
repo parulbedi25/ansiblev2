@@ -433,11 +433,17 @@ pipeline {
                         copy /Y ".qasip_hub_secret_key" "%WORKSPACE%\\kh_secret_key.txt" >nul
                         echo Secret key ready (value is not printed to the log).
                     """
-                    env.GENERATED_SECRET_KEY = readFile('kh_secret_key.txt').trim()
-                    if (!env.GENERATED_SECRET_KEY) {
-                        error 'Generated secret key is empty - see Generate Secret Key stage log'
+                    env.QASIP_HUB_SECRET_KEY = readFile('kh_secret_key.txt').trim()
+                    if (!env.QASIP_HUB_SECRET_KEY) {
+                        error 'QASIP_HUB_SECRET_KEY is empty - see Generate Secret Key stage log'
                     }
-                    echo 'QASIP_HUB_SECRET_KEY loaded for this pipeline execution (masked, not printed).'
+                    // A Fernet key is 32 bytes, URL-safe base64 encoded:
+                    // exactly 44 characters (including the trailing '=').
+                    // Validate the shape only - never print the value.
+                    if (env.QASIP_HUB_SECRET_KEY.length() != 44) {
+                        error "QASIP_HUB_SECRET_KEY has unexpected length ${env.QASIP_HUB_SECRET_KEY.length()} (expected 44 for a Fernet key) - see Generate Secret Key stage log"
+                    }
+                    echo "QASIP_HUB_SECRET_KEY stored in pipeline variable for later stages (length ${env.QASIP_HUB_SECRET_KEY.length()}, value not printed)."
                 }
             }
         }
@@ -479,7 +485,7 @@ pipeline {
                 // Qdrant credentials in this stage made migrations fail
                 // inside withCredentials (before any bat ran) whenever one
                 // of those unrelated credentials was missing in Jenkins.
-                // Alembic only needs DATABASE_URL + the generated SECRET_KEY.
+                // Alembic only needs DATABASE_URL + QASIP_HUB_SECRET_KEY.
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'knowledgehub-db-credentials',
@@ -494,8 +500,14 @@ pipeline {
                         echo Applying database migrations (alembic)
                         echo ========================================
 
+                        if "%QASIP_HUB_SECRET_KEY%" == "" (
+                            echo ERROR: QASIP_HUB_SECRET_KEY pipeline variable is empty - the Generate Secret Key stage did not provide it.
+                            exit /b 1
+                        )
+                        echo QASIP_HUB_SECRET_KEY is present for migrations (value not printed).
+
                         set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub"
-                        set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
+                        set "QASIP_HUB_SECRET_KEY=%QASIP_HUB_SECRET_KEY%"
 
                         cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                         call .venv\\Scripts\\activate.bat
@@ -582,6 +594,12 @@ pipeline {
 
                         echo Setting QASIP_HUB_* environment for the service...
 
+                        if "%QASIP_HUB_SECRET_KEY%" == "" (
+                            echo ERROR: QASIP_HUB_SECRET_KEY pipeline variable is empty - the Generate Secret Key stage did not provide it.
+                            exit /b 1
+                        )
+                        echo QASIP_HUB_SECRET_KEY is present for service configuration (value not printed).
+
                         set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub"
                         if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
                             set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY_RESOLVED%"
@@ -596,7 +614,7 @@ pipeline {
                             "QASIP_HUB_RELOAD=${env.QASIP_HUB_RELOAD}" ^
                             "QASIP_HUB_CORS_ORIGINS=${env.QASIP_HUB_CORS_ORIGINS}" ^
                             "QASIP_HUB_PUBLIC_URL=${env.QASIP_HUB_PUBLIC_URL}" ^
-                            "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%" ^
+                            "QASIP_HUB_SECRET_KEY=%QASIP_HUB_SECRET_KEY%" ^
                             "QASIP_HUB_LLM_PROVIDER=${env.QASIP_HUB_LLM_PROVIDER}" ^
                             "!KH_LLM_ENV!" ^
                             "QASIP_HUB_OPENAI_MODEL=${env.QASIP_HUB_OPENAI_MODEL}" ^
@@ -629,6 +647,13 @@ pipeline {
                             echo The Hub app will fall back to a default DB and /health will report db unavailable.
                             exit /b 1
                         )
+                        findstr /C:"QASIP_HUB_SECRET_KEY=" "%TEMP%\\kh_svc_env.txt" >nul
+                        if !ERRORLEVEL! NEQ 0 (
+                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
+                            echo ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment
+                            exit /b 1
+                        )
+                        echo [OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).
                         findstr /C:"@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub" "%TEMP%\\kh_svc_env.txt" >nul
                         if !ERRORLEVEL! NEQ 0 (
                             del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
