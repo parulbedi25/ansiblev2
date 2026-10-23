@@ -177,6 +177,57 @@ http {
     #}
 
 
+{% if knowledge_hub_enabled %}
+    # ------------------------------------------------------------------
+    # Knowledge Hub (added for the Knowledge Hub deployment; the ATMS
+    # server block above on {{ nginx_listen_port }} is untouched)
+    #   Admin UI : http://localhost:{{ knowledge_hub_listen_port }}/
+    #              http://<instance>.qajarvis.com:{{ knowledge_hub_listen_port }}/
+    #   Backend  : http://localhost:{{ knowledge_hub_backend_port }}/ (direct uvicorn)
+    #              /mcp and /health on this port are proxied to the backend
+    #              so browser calls from the UI can stay same-origin.
+    # ------------------------------------------------------------------
+    server {
+        listen       {{ knowledge_hub_listen_port }};
+        server_name  {{ knowledge_hub_server_name }};
+
+        root   {{ knowledge_hub_root }};
+        index  index.html;
+
+        # Angular SPA fallback - all unknown paths return the app shell
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        # Knowledge Hub API (health) - reverse proxy to the backend
+        location = /health {
+            proxy_pass   http://{{ knowledge_hub_backend_host }}:{{ knowledge_hub_backend_port }};
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_read_timeout 300s;
+        }
+
+        # Knowledge Hub MCP endpoints incl. the SSE stream.
+        # proxy_buffering MUST stay off and HTTP/1.1 keep-alive on,
+        # otherwise /mcp/stream events are buffered and never flush.
+        location /mcp/ {
+            proxy_pass   http://{{ knowledge_hub_backend_host }}:{{ knowledge_hub_backend_port }};
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header Connection        "";
+            proxy_buffering  off;
+            proxy_cache      off;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+        }
+
+        client_max_body_size 50M;
+    }
+{% endif %}
+
     # HTTPS server
     #
     #server {
