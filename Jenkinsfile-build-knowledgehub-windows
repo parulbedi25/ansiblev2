@@ -951,17 +951,44 @@ exit 0
             steps {
                 bat """
                     @echo off
+                    setlocal EnableDelayedExpansion
 
                     echo ========================================
                     echo Final verification
                     echo ========================================
 
+                    rem The backend is normally started by the
+                    rem 'Start Backend & Verify Health' stage. If it is
+                    rem not running here (service stopped mid-run, or a
+                    rem job definition without that stage), do not fail
+                    rem immediately - start it and wait for RUNNING.
+                    rem (NSSM only CONFIGURES the service; it does not
+                    rem start it.)
                     sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" | findstr "RUNNING" >nul
-                    if %ERRORLEVEL% NEQ 0 (
-                        echo ERROR: ${env.KNOWLEDGE_HUB_SERVICE_NAME} is not RUNNING
-                        exit /b 1
+                    if !ERRORLEVEL! EQU 0 (
+                        echo [OK] Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is RUNNING
+                    ) else (
+                        echo Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is not RUNNING - starting it now...
+                        net start "${env.KNOWLEDGE_HUB_SERVICE_NAME}"
+                        set KH_RUNNING=0
+                        for /l %%i in (1,1,10) do (
+                            if !KH_RUNNING! EQU 0 (
+                                sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" | findstr "RUNNING" >nul
+                                if !ERRORLEVEL! EQU 0 (
+                                    set KH_RUNNING=1
+                                ) else (
+                                    ping -n 4 127.0.0.1 >nul
+                                )
+                            )
+                        )
+                        if !KH_RUNNING! EQU 0 (
+                            echo ERROR: ${env.KNOWLEDGE_HUB_SERVICE_NAME} is still not RUNNING after a start attempt
+                            echo ---- backend stderr log ----
+                            type "${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log" 2>nul
+                            exit /b 1
+                        )
+                        echo [OK] Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is RUNNING ^(started by this stage^)
                     )
-                    echo [OK] Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is RUNNING
 
                     curl.exe --fail --silent http://localhost:${env.QASIP_HUB_PORT}/health >nul
                     if %ERRORLEVEL% NEQ 0 (
