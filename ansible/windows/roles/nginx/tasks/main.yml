@@ -76,11 +76,45 @@
 
 # Fail fast HERE if the template rendered a bad config, instead of
 # discovering it later as "connection refused" on 6003/8000.
+# NOTE (Windows): judge the syntax verdict in stderr, NOT the exit code.
+# `nginx -t` also tries to create the shared-memory object
+# "nginx_shared_zone"; while an nginx master (ATMS-Nginx, running as
+# SYSTEM) is up, that object is owned by SYSTEM and the Ansible user
+# gets "CreateFileMapping(...) failed (5: Access is denied)", making
+# nginx exit 1 even when it just printed "syntax is ok". Failing on
+# rc alone aborted provisioning before the service was (re)started,
+# which is why nothing ever listened on :8000.
 - name: Validate rendered nginx.conf (nginx -t)
   win_command: "{{ nginx_root_path }}\\nginx.exe -t -p {{ nginx_root_path }}"
   register: nginx_config_test
   changed_when: false
-  failed_when: nginx_config_test.rc != 0
+  failed_when: >-
+    nginx_config_test.rc != 0 and
+    'syntax is ok' not in (nginx_config_test.stderr | default(''))
+
+- name: Note when nginx -t was blocked by the running service (syntax still OK)
+  debug:
+    msg: >-
+      nginx -t exit code was {{ nginx_config_test.rc }} but the config
+      syntax is OK. This is the known Windows shared-zone alert
+      (CreateFileMapping Access is denied) caused by testing while an
+      nginx master is running; it is not a config error.
+      Output: {{ nginx_config_test.stderr | default('') }}
+  when:
+    - nginx_config_test.rc != 0
+    - "'syntax is ok' in (nginx_config_test.stderr | default(''))"
+
+# The Knowledge Hub :8000 server block serves from this directory
+# (Jenkinsfile-build-knowledgehub-windows publishes the Admin UI dist
+# into it). Create it up front so the server root always exists and
+# http://localhost:8000/ answers from the first provisioning run
+# (403 until the UI is published, instead of nginx erroring on a
+# missing root).
+- name: Ensure Knowledge Hub UI root directory exists
+  win_file:
+    path: "{{ nginx_root_path }}\\{{ knowledge_hub_root }}"
+    state: directory
+  when: knowledge_hub_enabled | bool
 
 - name: Install Nginx service using NSSM
   win_command: >
@@ -175,5 +209,24 @@
 
 # NOTE: no HTTP 200 check here on purpose - the admin UI files are only
 # published later by Jenkinsfile-build-knowledgehub-windows, so before
-# the first deploy this server correctly answers 403/404. Listening on
-# the port is the provisioning-level guarantee.
+# the first deploy this server correctly answers 403/404. What MUST be
+# true right after provisioning: http://localhost:8000/ gets an HTTP
+# answer at all (any status), instead of "connection refused".
+- name: Verify Knowledge Hub UI answers on localhost:{{ knowledge_hub_listen_port }}
+  win_shell: |
+    try {
+      $r = Invoke-WebRequest -Uri http://127.0.0.1:{{ knowledge_hub_listen_port }}/ -UseBasicParsing -TimeoutSec 5
+      Write-Host "HTTP $($r.StatusCode) from localhost:{{ knowledge_hub_listen_port }}"
+      exit 0
+    } catch {
+      if ($_.Exception.Response -ne $null) {
+        Write-Host "HTTP $([int]$_.Exception.Response.StatusCode) from localhost:{{ knowledge_hub_listen_port }} (expected before the Admin UI is published)"
+        exit 0
+      }
+      Write-Host "No HTTP answer on localhost:{{ knowledge_hub_listen_port }} - $($_.Exception.Message)"
+      exit 1
+    }
+  register: knowledge_hub_ui_check
+  changed_when: false
+  failed_when: knowledge_hub_ui_check.rc != 0
+  when: knowledge_hub_enabled | bool
