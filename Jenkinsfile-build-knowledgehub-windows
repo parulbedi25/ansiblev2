@@ -617,38 +617,27 @@ pipeline {
                             exit /b 1
                         )
 
-                        rem Verify what NSSM actually stored, reading its
-                        rem registry storage directly with PowerShell.
-                        rem (Do NOT go back to "nssm get ... > file" + findstr
-                        rem for this: NSSM writes Unicode output when
-                        rem redirected, and findstr matching on that file
-                        rem proved unreliable here - it passed the
-                        rem variable-name check but failed the URL check.)
-                        rem The script prints the stored DATABASE_URL with
-                        rem the password masked, so the Jenkins log shows
-                        rem exactly what the service will use.
-                        echo \$svc = '${env.KNOWLEDGE_HUB_SERVICE_NAME}' > "%TEMP%\\kh_verify_env.ps1"
-                        echo \$params = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\\$svc\\Parameters" >> "%TEMP%\\kh_verify_env.ps1"
-                        echo \$entries = @() >> "%TEMP%\\kh_verify_env.ps1"
-                        echo try { \$entries = @((Get-ItemProperty -Path \$params -Name AppEnvironmentExtra -ErrorAction Stop).AppEnvironmentExtra) } catch { Write-Host "ERROR: Could not read AppEnvironmentExtra from registry"; exit 1 } >> "%TEMP%\\kh_verify_env.ps1"
-                        echo \$line = \$null >> "%TEMP%\\kh_verify_env.ps1"
-                        echo foreach (\$e in \$entries) { if (\$e -like 'QASIP_HUB_DATABASE_URL=*') { \$line = \$e } } >> "%TEMP%\\kh_verify_env.ps1"
-                        echo if (-not \$line) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment'; exit 1 } >> "%TEMP%\\kh_verify_env.ps1"
-                        echo \$url = \$line.Substring('QASIP_HUB_DATABASE_URL='.Length) >> "%TEMP%\\kh_verify_env.ps1"
-                        echo \$safe = \$url -replace '://([^:/]+):[^@]*@', '://\$1:****@' >> "%TEMP%\\kh_verify_env.ps1"
-                        echo Write-Host "Stored service DATABASE_URL (masked): \$safe" >> "%TEMP%\\kh_verify_env.ps1"
-                        echo if (\$url -notlike '*@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub*') { Write-Host 'ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub'; exit 1 } >> "%TEMP%\\kh_verify_env.ps1"
-                        echo Write-Host '[OK] Service DATABASE_URL verified: it uses ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub' >> "%TEMP%\\kh_verify_env.ps1"
-                        echo exit 0 >> "%TEMP%\\kh_verify_env.ps1"
-
-                        powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\\kh_verify_env.ps1"
+                        rem Verify what NSSM actually stored (without printing
+                        rem secrets): the service DATABASE_URL must exist and
+                        rem must use localhost - the hostname resolves to the
+                        rem LAN IP and PG rejects it ("db":"unavailable").
+                        nssm get "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppEnvironmentExtra > "%TEMP%\\kh_svc_env.txt" 2>nul
+                        findstr /C:"QASIP_HUB_DATABASE_URL=" "%TEMP%\\kh_svc_env.txt" >nul
                         if !ERRORLEVEL! NEQ 0 (
-                            del "%TEMP%\\kh_verify_env.ps1" >nul 2>&1
-                            echo ERROR: Service DATABASE_URL verification FAILED - see the masked value printed above.
+                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
+                            echo ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment
+                            echo The Hub app will fall back to a default DB and /health will report db unavailable.
+                            exit /b 1
+                        )
+                        findstr /C:"@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub" "%TEMP%\\kh_svc_env.txt" >nul
+                        if !ERRORLEVEL! NEQ 0 (
+                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
+                            echo ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}
                             echo It must be postgresql://USER:PASSWORD@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub - not the hostname/LAN IP.
                             exit /b 1
                         )
-                        del "%TEMP%\\kh_verify_env.ps1" >nul 2>&1
+                        del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
+                        echo [OK] Service DATABASE_URL verified: postgresql://...@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub
 
                         echo Service configured. Starting it in the next stage.
                     """
