@@ -656,6 +656,29 @@ pipeline {
                         exit /b 1
                     )
 
+                    rem /health returns HTTP 200 even when the DB check inside
+                    rem it fails ("db":"unavailable") - inspect the payload and
+                    rem surface the service logs in that case, so the reason is
+                    rem in the Jenkins log instead of silently passing as ok.
+                    curl.exe --silent http://localhost:${env.QASIP_HUB_PORT}/health > "%TEMP%\\kh_health.json" 2>nul
+                    echo Backend /health payload:
+                    type "%TEMP%\\kh_health.json"
+                    echo.
+                    findstr /C:"\"db\":\"ok\"" "%TEMP%\\kh_health.json" >nul
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo WARNING: Backend reports DB NOT ok - the service cannot reach PostgreSQL as configured.
+                        echo Alembic connects fine with the same DATABASE_URL from Jenkins, so check:
+                        echo  1^) nssm get ${env.KNOWLEDGE_HUB_SERVICE_NAME} AppEnvironmentExtra  ^(DATABASE_URL present, localhost:5433^)
+                        echo  2^) the service logs below for the actual connection error
+                        echo ---- backend stderr log ^(tail^) ----
+                        powershell -NoProfile -Command "Get-Content '${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log' -Tail 40 -ErrorAction SilentlyContinue"
+                        echo ---- backend stdout log ^(tail^) ----
+                        powershell -NoProfile -Command "Get-Content '${env.KNOWLEDGE_HUB_LOG_DIR}\\stdout.log' -Tail 40 -ErrorAction SilentlyContinue"
+                        echo WARNING only - deployment continues, but Hub DB features will fail until this is fixed.
+                    ) else (
+                        echo [OK] Backend /health reports db ok
+                    )
+
                     echo Checking /mcp/tools...
                     curl.exe --fail --silent http://localhost:${env.QASIP_HUB_PORT}/mcp/tools >nul
                     if %ERRORLEVEL% NEQ 0 (
