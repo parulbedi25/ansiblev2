@@ -68,6 +68,27 @@
   when: nginx_service_check.exists
   failed_when: false
 
+# Stopping/removing the NSSM service does not guarantee the nginx.exe
+# processes are gone (a master can linger while workers drain, or one
+# was started outside the service). A leftover master keeps serving
+# :6003 with its OLD config and prevents the new master from binding,
+# so the run then times out waiting for :8000 while :6003 "works".
+# This role owns Nginx on the host, so clear any leftovers.
+- name: Ensure no leftover nginx.exe processes remain
+  win_shell: |
+    $procs = Get-Process -Name nginx -ErrorAction SilentlyContinue
+    if ($procs) {
+      Write-Host "Stopping $($procs.Count) leftover nginx.exe process(es)..."
+      $procs | Stop-Process -Force
+      Start-Sleep -Seconds 2
+    }
+    if (Get-Process -Name nginx -ErrorAction SilentlyContinue) {
+      Write-Host "ERROR: nginx.exe processes are still running"
+      exit 1
+    }
+    exit 0
+  changed_when: false
+
 - name: Deploy custom nginx.conf from template
   win_template:
     src: nginx.conf.j2
@@ -205,7 +226,37 @@
     port: "{{ knowledge_hub_listen_port }}"
     timeout: 30
     delay: 3
+  register: knowledge_hub_ui_wait
+  ignore_errors: true
   when: knowledge_hub_enabled | bool
+
+# If :8000 never binds, the reason is in the Nginx error log (bind
+# failure, another process on the port, bad root path...). Show it in
+# the provisioning log instead of leaving only "timeout while waiting".
+- name: Show Nginx error log if the UI listener did not start
+  win_shell: |
+    if (Test-Path "{{ nginx_log_dir }}\\error.log") {
+      Get-Content "{{ nginx_log_dir }}\\error.log" -Tail 30
+    } else {
+      Write-Host "No Nginx error log found at {{ nginx_log_dir }}\\error.log"
+    }
+    exit 0
+  changed_when: false
+  failed_when: false
+  when:
+    - knowledge_hub_enabled | bool
+    - knowledge_hub_ui_wait is failed
+
+- name: Fail if Knowledge Hub UI listener did not start
+  fail:
+    msg: >-
+      Nginx is not listening on port {{ knowledge_hub_listen_port }}
+      (Knowledge Hub UI). See the Nginx error log output above and
+      check on the host: netstat -ano | findstr :{{ knowledge_hub_listen_port }}
+      and findstr /N listen {{ nginx_root_path }}\\conf\\nginx.conf
+  when:
+    - knowledge_hub_enabled | bool
+    - knowledge_hub_ui_wait is failed
 
 # NOTE: no HTTP 200 check here on purpose - the admin UI files are only
 # published later by Jenkinsfile-build-knowledgehub-windows, so before
