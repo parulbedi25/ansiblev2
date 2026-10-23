@@ -112,6 +112,12 @@ pipeline {
         //   (Nginx server for :8000 is configured by the Ansible nginx
         //    role; its /mcp and /health locations proxy to 8037.)
         KNOWLEDGE_HUB_ADMIN_UI_URL     = "http://${KNOWLEDGE_HUB_HOSTNAME}:8000"
+        // PostgreSQL connection for the Hub MUST use localhost.
+        // Do NOT use KNOWLEDGE_HUB_HOSTNAME here: it resolves to the
+        // machine LAN IP, and PG 18's default pg_hba.conf only allows
+        // loopback, so the service then reports "db":"unavailable".
+        KNOWLEDGE_HUB_PG_HOST          = 'localhost'
+        KNOWLEDGE_HUB_PG_PORT          = '5433'
         QASIP_HUB_HOST                 = '0.0.0.0'
         QASIP_HUB_PORT                 = '8037'
         QASIP_HUB_RELOAD               = 'false'
@@ -190,7 +196,7 @@ pipeline {
                     echo   QASIP_HUB_PUBLIC_URL  = ${env.QASIP_HUB_PUBLIC_URL}
                     echo   QASIP_HUB_CORS_ORIGINS= ${env.QASIP_HUB_CORS_ORIGINS}
                     echo   QASIP_HUB_QDRANT_URL  = ${env.QASIP_HUB_QDRANT_URL}
-                    echo   DATABASE host         = localhost:5433 (same machine - pg_hba only allows loopback; the hostname/LAN IP is rejected)
+                    echo   DATABASE host         = ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT} (same machine - pg_hba only allows loopback; the hostname/LAN IP is rejected)
                     echo   VITE_HUB_API_URL      = ${env.VITE_HUB_API_URL}
                 """
             }
@@ -488,7 +494,7 @@ pipeline {
                         echo Applying database migrations (alembic)
                         echo ========================================
 
-                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
+                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub"
                         set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
 
                         cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
@@ -576,7 +582,7 @@ pipeline {
 
                         echo Setting QASIP_HUB_* environment for the service...
 
-                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
+                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub"
                         if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
                             set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY_RESOLVED%"
                         ) else (
@@ -610,6 +616,28 @@ pipeline {
                             echo ERROR: Failed to set service environment
                             exit /b 1
                         )
+
+                        rem Verify what NSSM actually stored (without printing
+                        rem secrets): the service DATABASE_URL must exist and
+                        rem must use localhost - the hostname resolves to the
+                        rem LAN IP and PG rejects it ("db":"unavailable").
+                        nssm get "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppEnvironmentExtra > "%TEMP%\\kh_svc_env.txt" 2>nul
+                        findstr /C:"QASIP_HUB_DATABASE_URL=" "%TEMP%\\kh_svc_env.txt" >nul
+                        if !ERRORLEVEL! NEQ 0 (
+                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
+                            echo ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment
+                            echo The Hub app will fall back to a default DB and /health will report db unavailable.
+                            exit /b 1
+                        )
+                        findstr /C:"@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub" "%TEMP%\\kh_svc_env.txt" >nul
+                        if !ERRORLEVEL! NEQ 0 (
+                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
+                            echo ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}
+                            echo It must be postgresql://USER:PASSWORD@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub - not the hostname/LAN IP.
+                            exit /b 1
+                        )
+                        del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
+                        echo [OK] Service DATABASE_URL verified: postgresql://...@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub
 
                         echo Service configured. Starting it in the next stage.
                     """
