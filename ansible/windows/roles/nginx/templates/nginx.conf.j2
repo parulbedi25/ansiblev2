@@ -177,31 +177,38 @@ http {
     #}
 
 
-{% if knowledge_hub_enabled %}
     # ------------------------------------------------------------------
-    # Knowledge Hub (added for the Knowledge Hub deployment; the ATMS
-    # server block above on {{ nginx_listen_port }} is untouched)
-    #   Admin UI : http://localhost:{{ knowledge_hub_listen_port }}/
-    #              http://<instance>.qajarvis.com:{{ knowledge_hub_listen_port }}/
-    #   Backend  : http://localhost:{{ knowledge_hub_backend_port }}/ (direct uvicorn)
-    #              /mcp and /health on this port are proxied to the backend
-    #              so browser calls from the UI can stay same-origin.
+    # Knowledge Hub Admin UI (the ATMS server block above on
+    # {{ nginx_listen_port }} is untouched)
+    #   Admin UI : http://localhost:8000/
+    #              http://<instance>.qajarvis.com:8000/
+    #   Backend  : http://localhost:8037/ (direct uvicorn)
+    #              /mcp and /health on this port are proxied to the
+    #              backend so browser calls from the UI can stay
+    #              same-origin (SSE needs proxy_buffering off).
+    # NOTE: this block is deliberately NOT conditional and uses
+    # literal values: "listen 8000;" must ALWAYS be present in the
+    # rendered nginx.conf. A previous conditional/variable-only
+    # version could render without the listener, after which the role
+    # timed out waiting for 127.0.0.1:8000 while :6003 kept working.
+    # The Jenkins pipeline publishes the Admin UI into html/knowledge-hub.
     # ------------------------------------------------------------------
     server {
-        listen       {{ knowledge_hub_listen_port }};
-        server_name  {{ knowledge_hub_server_name }};
+        listen       8000;
+        server_name  localhost _;
 
-        root   {{ knowledge_hub_root }};
+        root   html/knowledge-hub;
         index  index.html;
 
-        # Angular SPA fallback - all unknown paths return the app shell
+        # Angular SPA fallback - all unknown paths return the app shell,
+        # so http://localhost:8000/ opens the Knowledge Hub Admin UI
         location / {
             try_files $uri $uri/ /index.html;
         }
 
         # Knowledge Hub API (health) - reverse proxy to the backend
         location = /health {
-            proxy_pass   http://{{ knowledge_hub_backend_host }}:{{ knowledge_hub_backend_port }};
+            proxy_pass   http://127.0.0.1:8037;
             proxy_set_header Host              $host;
             proxy_set_header X-Real-IP         $remote_addr;
             proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
@@ -212,7 +219,7 @@ http {
         # proxy_buffering MUST stay off and HTTP/1.1 keep-alive on,
         # otherwise /mcp/stream events are buffered and never flush.
         location /mcp/ {
-            proxy_pass   http://{{ knowledge_hub_backend_host }}:{{ knowledge_hub_backend_port }};
+            proxy_pass   http://127.0.0.1:8037;
             proxy_http_version 1.1;
             proxy_set_header Host              $host;
             proxy_set_header X-Real-IP         $remote_addr;
@@ -226,7 +233,6 @@ http {
 
         client_max_body_size 50M;
     }
-{% endif %}
 
     # HTTPS server
     #
