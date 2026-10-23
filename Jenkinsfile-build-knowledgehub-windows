@@ -685,6 +685,12 @@ pipeline {
                     )
 
                     echo Backend health verified.
+                    rem The domain WARNING path above ends after a FAILED curl,
+                    rem whose ERRORLEVEL stays set (ECHO does not reset it) -
+                    rem without this exit the bat step would end non-zero and
+                    rem Jenkins would fail the stage despite the warning being
+                    rem intentional.
+                    exit /b 0
                 """
             }
         }
@@ -879,6 +885,9 @@ pipeline {
                     echo Manual check: open ${env.QASIP_HUB_CORS_ORIGINS}/${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/ and confirm API calls go to ${env.QASIP_HUB_PUBLIC_URL}
 
                     echo All deployment checks passed.
+                    rem Same stale-ERRORLEVEL guard as the health stage: the
+                    rem admin-UI WARNING path ends after a failed curl.
+                    exit /b 0
                 """
             }
         }
