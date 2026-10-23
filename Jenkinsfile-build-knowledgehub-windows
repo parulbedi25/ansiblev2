@@ -552,6 +552,34 @@ pipeline {
                     } catch (e) {
                         echo "WARNING: Jenkins credential 'knowledgehub-qdrant-api-key' not found - service will be configured with an EMPTY Qdrant API key (fine while Qdrant runs without auth)."
                     }
+
+                    // Verification script for the NSSM stage below. It is
+                    // run after "nssm set ... AppEnvironmentExtra" and
+                    // checks what the service ACTUALLY stored. It is
+                    // deliberately READ-ONLY and never extracts, masks,
+                    // rewrites or prints the DATABASE_URL value: it only
+                    // does plain substring (.Contains) checks on the
+                    // full nssm output, so the password and every URL
+                    // parameter pass through untouched. (An earlier
+                    // regex-extract + mask version could truncate the
+                    // URL it inspected; checking from batch proved
+                    // unreliable too - findstr matched the short NAME=
+                    // patterns but not the URL string, and batch
+                    // substitution syntax failed to parse with
+                    // ': was unexpected at this time.')
+                    // (\$ below = literal $ for PowerShell; the
+                    // ${env...} parts are filled in by Groovy.)
+                    writeFile file: 'kh_verify_env.ps1', text: """
+\$svc = '${env.KNOWLEDGE_HUB_SERVICE_NAME}'
+\$raw = (nssm get \$svc AppEnvironmentExtra | Out-String -Width 4096)
+if (-not \$raw) { Write-Host 'ERROR: Could not read the service environment via nssm get'; exit 1 }
+if (-not \$raw.Contains('QASIP_HUB_DATABASE_URL=')) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }
+if (-not \$raw.Contains("@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub")) { Write-Host 'ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub'; exit 1 }
+if (-not \$raw.Contains('QASIP_HUB_SECRET_KEY=')) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }
+Write-Host '[OK] Service DATABASE_URL verified: present and uses ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub (value not printed).'
+Write-Host '[OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).'
+exit 0
+"""
                 }
                 withCredentials([
                     usernamePassword(
@@ -635,59 +663,25 @@ pipeline {
                             exit /b 1
                         )
 
-                        rem Verify what NSSM actually stored (without printing
-                        rem secrets): the service DATABASE_URL must exist and
-                        rem must use localhost - the hostname resolves to the
-                        rem LAN IP and PG rejects it ("db":"unavailable").
-                        rem NOTE: do NOT check the URL with findstr against
-                        rem the raw "nssm get" output file. findstr matched
-                        rem the short NAME= patterns in that file but not
-                        rem the longer "@localhost:5433/qasip_hub" string,
-                        rem failing this stage even with the correct value
-                        rem stored. Extract the stored line and compare it
-                        rem in memory instead (batch string substitution).
-                        nssm get "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppEnvironmentExtra > "%TEMP%\\kh_svc_env.txt" 2>nul
-
-                        set "KH_STORED_DB_LINE="
-                        for /f "delims=" %%L in ('findstr /C:"QASIP_HUB_DATABASE_URL=" "%TEMP%\\kh_svc_env.txt"') do set "KH_STORED_DB_LINE=%%L"
-                        if "!KH_STORED_DB_LINE!" == "" (
-                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
-                            echo ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment
-                            echo The Hub app will fall back to a default DB and /health will report db unavailable.
-                            exit /b 1
-                        )
-
-                        rem Show what the service will actually use, with the
-                        rem DB password masked. (Percent expansion puts the
-                        rem password value into the delayed-expansion
-                        rem substitution below; Jenkins also masks the bound
-                        rem credential in the log. The value is never printed.)
-                        if "%KH_DB_PASSWORD%" == "" (
-                            echo Stored service DATABASE_URL: !KH_STORED_DB_LINE!
-                        ) else (
-                            echo Stored service DATABASE_URL (password masked): !KH_STORED_DB_LINE:%KH_DB_PASSWORD%=****!
-                        )
-
-                        findstr /C:"QASIP_HUB_SECRET_KEY=" "%TEMP%\\kh_svc_env.txt" >nul
+                        rem Verify what NSSM actually stored, via the
+                        rem PowerShell script written in the script block
+                        rem above (kh_verify_env.ps1). It prints the stored
+                        rem DATABASE_URL with the password masked, checks
+                        rem QASIP_HUB_SECRET_KEY is present, and fails
+                        rem (exit 1) if the URL is missing or does not use
+                        rem ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}.
+                        rem Do NOT reimplement this in batch: findstr on
+                        rem the "nssm get" output matched the short NAME=
+                        rem patterns but not the URL string, and batch
+                        rem substitution syntax failed to parse
+                        rem (": was unexpected at this time.").
+                        powershell -NoProfile -ExecutionPolicy Bypass -File "%WORKSPACE%\\kh_verify_env.ps1"
                         if !ERRORLEVEL! NEQ 0 (
-                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
-                            echo ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment
+                            del "%WORKSPACE%\\kh_verify_env.ps1" >nul 2>&1
+                            echo ERROR: Service environment verification FAILED - see the masked DATABASE_URL printed above.
                             exit /b 1
                         )
-                        echo [OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).
-
-                        rem In-memory host check: removing the expected
-                        rem "@localhost:5433/qasip_hub" part must CHANGE the
-                        rem stored line; if it does not, the service is not
-                        rem using localhost (see masked value above).
-                        if "!KH_STORED_DB_LINE:@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub=!" == "!KH_STORED_DB_LINE!" (
-                            del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
-                            echo ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}
-                            echo It must be postgresql://USER:PASSWORD@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub - not the hostname/LAN IP. Compare with the stored (masked) value printed above.
-                            exit /b 1
-                        )
-                        del "%TEMP%\\kh_svc_env.txt" >nul 2>&1
-                        echo [OK] Service DATABASE_URL verified: postgresql://...@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub
+                        del "%WORKSPACE%\\kh_verify_env.ps1" >nul 2>&1
 
                         echo Service configured. Starting it in the next stage.
                     """
