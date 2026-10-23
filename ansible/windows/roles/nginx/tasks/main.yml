@@ -149,3 +149,15 @@
   register: nginx_check
   changed_when: false
   failed_when: nginx_check.rc != 0
+
+- name: Wait for Knowledge Hub UI listener (port {{ knowledge_hub_listen_port }})
+  win_wait_for:
+    port: "{{ knowledge_hub_listen_port }}"
+    timeout: 30
+    delay: 3
+  when: knowledge_hub_enabled | bool
+
+# NOTE: no HTTP 200 check here on purpose - the admin UI files are only
+# published later by Jenkinsfile-build-knowledgehub-windows, so before
+# the first deploy this server correctly answers 403/404. Listening on
+# the port is the provisioning-level guarantee.

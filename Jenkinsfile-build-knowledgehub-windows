@@ -104,11 +104,19 @@ pipeline {
         // (These names are read by the Knowledge Hub app itself, so they
         //  keep their QASIP_HUB_ names; secrets come from Jenkins
         //  credentials / the generated secret key - never from git.)
+        // Port layout (per deployment requirement):
+        //   Knowledge Hub backend (uvicorn, direct) : 8037
+        //     -> http://localhost:8037  and  http://<hostname>:8037
+        //   Knowledge Hub Admin UI (served by Nginx) : 8000
+        //     -> http://localhost:8000  and  http://<hostname>:8000
+        //   (Nginx server for :8000 is configured by the Ansible nginx
+        //    role; its /mcp and /health locations proxy to 8037.)
+        KNOWLEDGE_HUB_ADMIN_UI_URL     = "http://${KNOWLEDGE_HUB_HOSTNAME}:8000"
         QASIP_HUB_HOST                 = '0.0.0.0'
-        QASIP_HUB_PORT                 = '8000'
+        QASIP_HUB_PORT                 = '8037'
         QASIP_HUB_RELOAD               = 'false'
-        QASIP_HUB_CORS_ORIGINS         = "https://${KNOWLEDGE_HUB_HOSTNAME}"
-        QASIP_HUB_PUBLIC_URL           = "https://${KNOWLEDGE_HUB_HOSTNAME}"
+        QASIP_HUB_CORS_ORIGINS         = "http://localhost:8000,http://${KNOWLEDGE_HUB_HOSTNAME}:8000"
+        QASIP_HUB_PUBLIC_URL           = "http://${KNOWLEDGE_HUB_HOSTNAME}:${QASIP_HUB_PORT}"
         QASIP_HUB_LLM_PROVIDER         = 'openai'
         QASIP_HUB_OPENAI_MODEL         = ''
         QASIP_HUB_AZURE_OPENAI_ENDPOINT    = ''
@@ -122,8 +130,10 @@ pipeline {
         QASIP_HUB_LOG_LEVEL            = 'INFO'
         QASIP_HUB_AUDIT_ENABLED        = 'true'
 
-        // Frontend build variable (baked into the JS bundle at build time)
-        VITE_HUB_API_URL = "https://${KNOWLEDGE_HUB_HOSTNAME}"
+        // Frontend build variable (baked into the JS bundle at build time).
+        // The browser calls the backend directly on its own port (8037);
+        // QASIP_HUB_CORS_ORIGINS above allows the :8000 UI origins.
+        VITE_HUB_API_URL = "http://${KNOWLEDGE_HUB_HOSTNAME}:8037"
     }
 
     stages {
@@ -653,32 +663,21 @@ pipeline {
                         exit /b 1
                     )
 
-                    echo Checking API domain ${env.QASIP_HUB_PUBLIC_URL} ...
+                    echo Checking backend via hostname ${env.QASIP_HUB_PUBLIC_URL} ...
                     curl.exe --fail --silent ${env.QASIP_HUB_PUBLIC_URL}/health >nul
                     if %ERRORLEVEL% NEQ 0 (
-                        echo WARNING: ${env.QASIP_HUB_PUBLIC_URL}/health not reachable yet.
-                        echo The backend itself IS healthy on localhost - the missing piece is
-                        echo the Nginx reverse proxy ^(and TLS^) for this domain. Add once, in the
-                        echo Nginx server block for ${env.KNOWLEDGE_HUB_HOSTNAME}:
-                        echo.
-                        echo     location / {
-                        echo         proxy_pass http://127.0.0.1:${env.QASIP_HUB_PORT};
-                        echo         proxy_set_header Host \$host;
-                        echo         proxy_set_header X-Real-IP \$remote_addr;
-                        echo         proxy_http_version 1.1;
-                        echo         proxy_set_header Connection "";
-                        echo         proxy_buffering off;
-                        echo     }
-                        echo.
-                        echo ^(proxy_buffering off + HTTP/1.1 keep-alive are needed for the SSE
-                        echo  endpoint /mcp/stream. Then: nginx.exe -s reload, and verify manually:
-                        echo  curl ${env.QASIP_HUB_PUBLIC_URL}/health^)
+                        echo WARNING: ${env.QASIP_HUB_PUBLIC_URL}/health not reachable via hostname yet.
+                        echo The backend itself IS healthy on localhost:${env.QASIP_HUB_PORT} - this URL
+                        echo goes direct to uvicorn ^(no Nginx involved^). Check: 1^) the hosts entry
+                        echo for ${env.KNOWLEDGE_HUB_HOSTNAME} resolves on this machine, 2^) Windows
+                        echo Firewall allows inbound TCP ${env.QASIP_HUB_PORT}, 3^) uvicorn is bound to
+                        echo 0.0.0.0. Verify manually: curl ${env.QASIP_HUB_PUBLIC_URL}/health
                         echo This is a WARNING only - deployment continues.
                     ) else (
                         echo [OK] ${env.QASIP_HUB_PUBLIC_URL}/health
                         curl.exe --fail --silent ${env.QASIP_HUB_PUBLIC_URL}/mcp/tools >nul
                         if %ERRORLEVEL% NEQ 0 (
-                            echo WARNING: ${env.QASIP_HUB_PUBLIC_URL}/mcp/tools failed via the domain ^(local check passed^) - check the Nginx proxy.
+                            echo WARNING: ${env.QASIP_HUB_PUBLIC_URL}/mcp/tools failed via hostname ^(local check passed^).
                         ) else (
                             echo [OK] ${env.QASIP_HUB_PUBLIC_URL}/mcp/tools
                         )
@@ -828,16 +827,12 @@ pipeline {
                     dir /B "%KH_UI_TARGET%"
 
                     echo.
-                    echo IMPORTANT - Nginx must serve this subfolder with SPA fallback.
-                    echo Add ^(once, in the Nginx server block for the admin-ui domain^):
-                    echo.
-                    echo     location /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/ {
-                    echo         alias ${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}\\;
-                    echo         try_files \$uri \$uri/ /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/index.html;
-                    echo     }
-                    echo.
-                    echo Then reload Nginx:  nginx.exe -s reload  ^(from the Nginx root dir^)
-                    echo Static files need no Nginx restart; the reload is only for the location config.
+                    echo The Admin UI is served by the Nginx server listening on port 8000
+                    echo ^(configured by the Ansible nginx role - templates/nginx.conf.j2^),
+                    echo with root html\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH} and SPA fallback, so it is
+                    echo reachable at http://localhost:8000/ and ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/
+                    echo once provisioning has run and the ATMS-Nginx service is started.
+                    echo Static file changes need no Nginx restart.
                 """
             }
         }
@@ -873,16 +868,17 @@ pipeline {
                     )
                     echo [OK] Backend /mcp/tools
 
-                    curl.exe --fail --silent ${env.QASIP_HUB_CORS_ORIGINS}/${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/ >nul
+                    curl.exe --fail --silent ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ >nul
                     if %ERRORLEVEL% NEQ 0 (
-                        echo WARNING: Admin UI not reachable yet at ${env.QASIP_HUB_CORS_ORIGINS}/${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/
-                        echo The files ARE published ^(see Publish stage^) - the Nginx location
-                        echo for /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/ ^(and TLS for this domain^) likely still needs
-                        echo to be added/reloaded. This is a WARNING only.
+                        echo WARNING: Admin UI not reachable yet at ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/
+                        echo The files ARE published ^(see Publish stage^) - the Nginx server
+                        echo listening on 8000 ^(configured by the Ansible nginx role^) likely
+                        echo still needs a provisioning re-run / service restart, or Windows
+                        echo Firewall blocks inbound TCP 8000. This is a WARNING only.
                     ) else (
-                        echo [OK] Admin UI reachable: ${env.QASIP_HUB_CORS_ORIGINS}/${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/
+                        echo [OK] Admin UI reachable: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/
                     )
-                    echo Manual check: open ${env.QASIP_HUB_CORS_ORIGINS}/${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/ and confirm API calls go to ${env.QASIP_HUB_PUBLIC_URL}
+                    echo Manual check: open ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ ^(or http://localhost:8000/^) and confirm API calls go to ${env.QASIP_HUB_PUBLIC_URL}
 
                     echo All deployment checks passed.
                     rem Same stale-ERRORLEVEL guard as the health stage: the
@@ -905,7 +901,7 @@ pipeline {
             Backend Service : ${env.KNOWLEDGE_HUB_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
             Backend Health  : http://localhost:${env.QASIP_HUB_PORT}/health
             API Domain      : ${env.QASIP_HUB_PUBLIC_URL}
-            Admin UI Domain : ${env.QASIP_HUB_CORS_ORIGINS} (path: /${env.KNOWLEDGE_HUB_ADMIN_UI_PATH}/)
+            Admin UI        : ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ (Nginx :8000, also http://localhost:8000/)
 
             ====================================================
             """
