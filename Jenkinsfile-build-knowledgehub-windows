@@ -555,30 +555,29 @@ pipeline {
 
                     // Verification script for the NSSM stage below. It is
                     // run after "nssm set ... AppEnvironmentExtra" and
-                    // checks what the service ACTUALLY stored, printing
-                    // the DATABASE_URL with the password masked.
-                    // PowerShell is used on purpose: checking NSSM's
-                    // output from batch proved unreliable twice
-                    // (findstr matched the short NAME= patterns but not
-                    // the longer URL string; batch substitution syntax
-                    // then failed to parse with ': was unexpected at
-                    // this time.'). PowerShell reads nssm's output
-                    // natively and masks with a regex instead.
+                    // checks what the service ACTUALLY stored. It is
+                    // deliberately READ-ONLY and never extracts, masks,
+                    // rewrites or prints the DATABASE_URL value: it only
+                    // does plain substring (.Contains) checks on the
+                    // full nssm output, so the password and every URL
+                    // parameter pass through untouched. (An earlier
+                    // regex-extract + mask version could truncate the
+                    // URL it inspected; checking from batch proved
+                    // unreliable too - findstr matched the short NAME=
+                    // patterns but not the URL string, and batch
+                    // substitution syntax failed to parse with
+                    // ': was unexpected at this time.')
                     // (\$ below = literal $ for PowerShell; the
                     // ${env...} parts are filled in by Groovy.)
                     writeFile file: 'kh_verify_env.ps1', text: """
 \$svc = '${env.KNOWLEDGE_HUB_SERVICE_NAME}'
-\$raw = (nssm get \$svc AppEnvironmentExtra | Out-String)
+\$raw = (nssm get \$svc AppEnvironmentExtra | Out-String -Width 4096)
 if (-not \$raw) { Write-Host 'ERROR: Could not read the service environment via nssm get'; exit 1 }
-\$m = [regex]::Match(\$raw, 'QASIP_HUB_DATABASE_URL=(\\S+)')
-if (-not \$m.Success) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }
-\$url = \$m.Groups[1].Value
-\$safe = \$url -replace '://([^:/]+):[^@]*@', '://\$1:****@'
-Write-Host "Stored service DATABASE_URL (password masked): \$safe"
-if (\$raw -notmatch 'QASIP_HUB_SECRET_KEY=\\S+') { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }
+if (-not \$raw.Contains('QASIP_HUB_DATABASE_URL=')) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }
+if (-not \$raw.Contains("@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub")) { Write-Host 'ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub'; exit 1 }
+if (-not \$raw.Contains('QASIP_HUB_SECRET_KEY=')) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }
+Write-Host '[OK] Service DATABASE_URL verified: present and uses ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub (value not printed).'
 Write-Host '[OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).'
-if (\$url -notlike '*@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub*') { Write-Host 'ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub - compare with the masked value above'; exit 1 }
-Write-Host '[OK] Service DATABASE_URL verified: it uses ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub'
 exit 0
 """
                 }
