@@ -753,16 +753,46 @@ pipeline {
 
                     if exist "%KH_UI_TARGET%" (
                         echo Backing up previous Hub UI to %KH_UI_BACKUP% ...
-                        robocopy "%KH_UI_TARGET%" "%KH_UI_BACKUP%" /MIR >nul
+                        robocopy "%KH_UI_TARGET%" "%KH_UI_BACKUP%" /MIR /R:2 /W:2 >nul
+                        if %ERRORLEVEL% GEQ 8 (
+                            echo WARNING: Backup of previous Hub UI failed ^(robocopy code %ERRORLEVEL%^) - continuing with publish.
+                        )
                     )
 
-                    if not exist "%KH_UI_TARGET%" mkdir "%KH_UI_TARGET%"
-
-                    robocopy "${env.KNOWLEDGE_HUB_FRONTEND_DIR}\\dist" "%KH_UI_TARGET%" /MIR >nul
-                    if %ERRORLEVEL% GEQ 8 (
-                        echo ERROR: Failed to publish dist to %KH_UI_TARGET% ^(robocopy code %ERRORLEVEL%^)
+                    rem Fail early with a clear message if the build output is
+                    rem not where it should be (previous stage verifies this,
+                    rem but robocopy code 16 otherwise hides the real reason).
+                    if not exist "${env.KNOWLEDGE_HUB_FRONTEND_DIR}\\dist\\index.html" (
+                        echo ERROR: Frontend build output not found:
+                        echo   ${env.KNOWLEDGE_HUB_FRONTEND_DIR}\\dist\\index.html
+                        echo Frontend directory contents:
+                        dir /B "${env.KNOWLEDGE_HUB_FRONTEND_DIR}"
                         exit /b 1
                     )
+
+                    if not exist "%KH_UI_TARGET%" (
+                        mkdir "%KH_UI_TARGET%"
+                        if not exist "%KH_UI_TARGET%" (
+                            echo ERROR: Could not create target directory %KH_UI_TARGET%
+                            echo Check that the Jenkins agent user can write to ${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}
+                            echo ^(if %KH_UI_TARGET% exists as a FILE, delete it first^).
+                            exit /b 1
+                        )
+                    )
+
+                    echo Source : ${env.KNOWLEDGE_HUB_FRONTEND_DIR}\\dist
+                    echo Target : %KH_UI_TARGET%
+                    robocopy "${env.KNOWLEDGE_HUB_FRONTEND_DIR}\\dist" "%KH_UI_TARGET%" /MIR /R:2 /W:2 > "%TEMP%\\kh_robocopy.log" 2>&1
+                    if %ERRORLEVEL% GEQ 8 (
+                        echo ERROR: Failed to publish dist to %KH_UI_TARGET% ^(robocopy code %ERRORLEVEL%^)
+                        echo ---- robocopy log ----
+                        type "%TEMP%\\kh_robocopy.log"
+                        echo ---- checks ----
+                        dir /B "${env.KNOWLEDGE_HUB_FRONTEND_DIR}\\dist"
+                        dir /B "${env.KNOWLEDGE_HUB_NGINX_HTML_DIR}"
+                        exit /b 1
+                    )
+                    echo Robocopy completed ^(code %ERRORLEVEL% - codes 0-7 are success variants^).
 
                     echo Published. Files:
                     dir /B "%KH_UI_TARGET%"
