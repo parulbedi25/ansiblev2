@@ -74,6 +74,14 @@
     dest: "{{ nginx_root_path }}\\conf\\nginx.conf"
   notify: restart nginx
 
+# Fail fast HERE if the template rendered a bad config, instead of
+# discovering it later as "connection refused" on 6003/8000.
+- name: Validate rendered nginx.conf (nginx -t)
+  win_command: "{{ nginx_root_path }}\\nginx.exe -t -p {{ nginx_root_path }}"
+  register: nginx_config_test
+  changed_when: false
+  failed_when: nginx_config_test.rc != 0
+
 - name: Install Nginx service using NSSM
   win_command: >
     nssm install "{{ nginx_service_name }}"
@@ -114,6 +122,14 @@
     name: "{{ nginx_service_name }}"
     start_mode: auto
     state: started
+
+# Do NOT leave the config restart to the handler alone: handlers only
+# flush at the end of a FULLY successful play, and many roles run after
+# nginx in windows.yml. If a later role fails, the handler never fires
+# and the running Nginx keeps the OLD config (e.g. no :8000 server).
+# Flushing here applies a changed nginx.conf immediately.
+- name: Apply pending Nginx restart now (flush handlers)
+  meta: flush_handlers
 
 - name: Check Nginx version
   win_command: nginx -v
