@@ -1016,6 +1016,21 @@ exit 0
                     )
                     echo Manual check: open ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ ^(or http://localhost:8000/^) and confirm API calls go to ${env.QASIP_HUB_PUBLIC_URL}
 
+                    rem Explicit acceptance check for the Admin UI as a
+                    rem user opens it: http://localhost:8000/ must answer
+                    rem (Nginx server on :8000, configured by the Ansible
+                    rem nginx role; this pipeline only publishes files).
+                    curl.exe --fail --silent http://localhost:8000/ >nul
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo WARNING: Admin UI not reachable at http://localhost:8000/
+                        echo Nginx is managed by Ansible provisioning - re-run provisioning
+                        echo so roles/nginx deploys the :8000 server block and restarts
+                        echo ATMS-Nginx, then check: netstat -ano ^| findstr :8000
+                        echo This is a WARNING only - the UI files ARE published.
+                    ) else (
+                        echo [OK] Admin UI reachable: http://localhost:8000/
+                    )
+
                     echo All deployment checks passed.
                     rem Same stale-ERRORLEVEL guard as the health stage: the
                     rem admin-UI WARNING path ends after a failed curl.
