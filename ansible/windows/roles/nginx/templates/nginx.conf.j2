@@ -180,9 +180,16 @@ http {
     # ------------------------------------------------------------------
     # Knowledge Hub Admin UI (the ATMS server block above on
     # {{ nginx_listen_port }} is untouched)
+    #   Backend : D:\copper-code\AI-Python\Knowledge_Hub - SEPARATE
+    #             directory, Python/uvicorn app run by the NSSM service
+    #             QASIP-KnowledgeHub on http://localhost:8037/ (direct).
+    #             Nginx serves NO files from the backend directory.
+    #   Frontend: D:\copper-code\AI-Python\Knowledge_Hub_Admin - SEPARATE
+    #             directory; Jenkins builds it (npm run build) and
+    #             PUBLISHES dist into the Nginx root below, so Nginx
+    #             serves the published copy, not the source directory:
     #   Admin UI : http://localhost:8000/
     #              http://<instance>.qajarvis.com:8000/
-    #   Backend  : http://localhost:8037/ (direct uvicorn)
     #              /mcp and /health on this port are proxied to the
     #              backend so browser calls from the UI can stay
     #              same-origin (SSE needs proxy_buffering off).

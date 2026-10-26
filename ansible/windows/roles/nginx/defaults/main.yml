@@ -25,16 +25,35 @@ backend_api_port: "8080"
 nginx_listen_port: "6003"
 
 # Knowledge Hub (added for the Knowledge Hub deployment - the ATMS server
-# block above/listening on nginx_listen_port is untouched):
+# block above/listening on nginx_listen_port is untouched).
+# The backend and the Admin UI are SEPARATE applications in SEPARATE
+# directories on the target - do not mix them up:
+#   - Backend : knowledge_hub_backend_dir (D:\copper-code\AI-Python\
+#     Knowledge_Hub) - a Python/uvicorn app run by the NSSM service
+#     QASIP-KnowledgeHub on port 8037. Nginx never serves files from
+#     this directory; it only reverse-proxies to it (below).
+#   - Frontend: knowledge_hub_frontend_dir (D:\copper-code\AI-Python\
+#     Knowledge_Hub_Admin) - built by Jenkinsfile-build-knowledgehub-
+#     windows (npm run build -> dist) and the built files are PUBLISHED
+#     (copied) into the Nginx root below. Nginx never serves files
+#     directly from the frontend source directory either.
 #   - Admin UI is served by Nginx on knowledge_hub_listen_port (8000),
-#     root = html/knowledge-hub (the Jenkins pipeline publishes dist/ there)
-#   - Knowledge Hub backend (uvicorn) runs directly on
-#     knowledge_hub_backend_port (8037); /mcp and /health on the UI port
-#     are reverse-proxied to it so browser calls can stay same-origin
-#     (SSE at /mcp/stream needs proxy_buffering off).
+#     root = knowledge_hub_root under the Nginx install
+#     (D:\QASIP\Apps\nginx\html\knowledge-hub) - the published copy.
+#   - /health and /mcp/ on the UI port (8000) are reverse-proxied to
+#     the backend at knowledge_hub_backend_host:knowledge_hub_backend_port
+#     (127.0.0.1:8037) so browser calls can stay same-origin (SSE at
+#     /mcp/stream needs proxy_buffering off).
 knowledge_hub_enabled: true
 knowledge_hub_listen_port: "8000"
 knowledge_hub_server_name: "_"   # answer for localhost and <instance>.qajarvis.com alike
 knowledge_hub_root: "html/knowledge-hub"
+knowledge_hub_ui_root_path: "{{ nginx_root_path }}\\{{ knowledge_hub_root }}"
 knowledge_hub_backend_host: "127.0.0.1"
 knowledge_hub_backend_port: "8037"
+# Separate application directories on the target (code is already on the
+# machine - Ansible does not create or modify these, they are recorded
+# here so the layout is explicit and can be checked during provisioning).
+knowledge_hub_backend_dir: 'D:\copper-code\AI-Python\Knowledge_Hub'
+knowledge_hub_frontend_dir: 'D:\copper-code\AI-Python\Knowledge_Hub_Admin'
+knowledge_hub_frontend_dist_dir: 'D:\copper-code\AI-Python\Knowledge_Hub_Admin\dist'

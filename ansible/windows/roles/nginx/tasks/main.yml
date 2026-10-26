@@ -133,18 +133,56 @@
 # missing root).
 - name: Confirm deployed nginx.conf contains the Knowledge Hub :8000 listener
   win_shell: |
-    if (Select-String -Path "{{ nginx_root_path }}\\conf\\nginx.conf" -Pattern 'listen\s+8000;' -Quiet) {
-      Write-Host "OK: nginx.conf contains 'listen 8000;'"
-      exit 0
+    $conf = "{{ nginx_root_path }}\\conf\\nginx.conf"
+    if (-not (Select-String -Path $conf -Pattern 'listen\s+8000;' -Quiet)) {
+      Write-Host "ERROR: 'listen 8000;' NOT found in $conf - the Knowledge Hub UI server block did not deploy"
+      exit 1
     }
-    Write-Host "ERROR: 'listen 8000;' NOT found in {{ nginx_root_path }}\\conf\\nginx.conf - the Knowledge Hub UI server block did not deploy"
-    exit 1
+    Write-Host "OK: nginx.conf contains 'listen 8000;' (Knowledge Hub Admin UI)"
+    if (-not (Select-String -Path $conf -Pattern 'root\s+html/knowledge-hub;' -Quiet)) {
+      Write-Host "ERROR: Knowledge Hub UI root 'html/knowledge-hub' NOT found in $conf"
+      exit 1
+    }
+    Write-Host "OK: nginx.conf serves the published Admin UI from html/knowledge-hub on :8000"
+    if (-not (Select-String -Path $conf -Pattern 'proxy_pass\s+http://127\.0\.0\.1:8037;' -Quiet)) {
+      Write-Host "ERROR: Knowledge Hub backend proxy '127.0.0.1:8037' NOT found in $conf"
+      exit 1
+    }
+    Write-Host "OK: nginx.conf proxies /health and /mcp/ to the backend on 127.0.0.1:8037"
+    exit 0
   changed_when: false
   when: knowledge_hub_enabled | bool
 
+# The backend (Knowledge_Hub, :8037) and the Admin UI (Knowledge_Hub_Admin,
+# :8000) are separate applications in separate directories. The code is
+# already on the machine (Ansible does not create it) - only report if a
+# directory is missing; the Knowledge Hub pipeline fails clearly later if
+# the code really is absent.
+- name: Check the separate Knowledge Hub backend/frontend directories
+  win_stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ knowledge_hub_backend_dir }}"
+    - "{{ knowledge_hub_frontend_dir }}"
+  register: knowledge_hub_code_dirs
+  changed_when: false
+  when: knowledge_hub_enabled | bool
+
+- name: Report missing Knowledge Hub code directories (if any)
+  debug:
+    msg: >-
+      WARNING: {{ item.item }} was not found on this machine. The
+      Knowledge Hub backend (:8037) and Admin UI (:8000) live in separate
+      directories - deploy the code there before running
+      Jenkinsfile-build-knowledgehub-windows.
+  loop: "{{ knowledge_hub_code_dirs.results | default([]) }}"
+  when:
+    - knowledge_hub_enabled | bool
+    - not (item.stat.exists | default(false))
+
 - name: Ensure Knowledge Hub UI root directory exists
   win_file:
-    path: "{{ nginx_root_path }}\\{{ knowledge_hub_root }}"
+    path: "{{ knowledge_hub_ui_root_path }}"
     state: directory
   when: knowledge_hub_enabled | bool
 
