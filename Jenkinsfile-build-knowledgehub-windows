@@ -556,11 +556,12 @@ pipeline {
                     // Verification script for the NSSM stage below. It is
                     // run after "nssm set ... AppEnvironmentExtra" and
                     // checks what the service ACTUALLY stored. It is
-                    // deliberately READ-ONLY and never extracts, masks,
-                    // rewrites or prints the DATABASE_URL value: it only
-                    // does plain substring (.Contains) checks on the
-                    // full nssm output, so the password and every URL
-                    // parameter pass through untouched. (An earlier
+                    // READ-ONLY: it reads the environment line by line
+                    // and prints only the host part of the stored
+                    // DATABASE_URL (everything from the last '@'), so
+                    // the log shows what the service will use without
+                    // ever exposing the password. It never rewrites
+                    // the stored value. (An earlier
                     // regex-extract + mask version could truncate the
                     // URL it inspected; checking from batch proved
                     // unreliable too - findstr matched the short NAME=
@@ -571,12 +572,28 @@ pipeline {
                     // ${env...} parts are filled in by Groovy.)
                     writeFile file: 'kh_verify_env.ps1', text: """
 \$svc = '${env.KNOWLEDGE_HUB_SERVICE_NAME}'
-\$raw = (nssm get \$svc AppEnvironmentExtra | Out-String -Width 4096)
-if (-not \$raw) { Write-Host 'ERROR: Could not read the service environment via nssm get'; exit 1 }
-if (-not \$raw.Contains('QASIP_HUB_DATABASE_URL=')) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }
-if (-not \$raw.Contains("@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub")) { Write-Host 'ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub'; exit 1 }
-if (-not \$raw.Contains('QASIP_HUB_SECRET_KEY=')) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }
-Write-Host '[OK] Service DATABASE_URL verified: present and uses ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub (value not printed).'
+\$lines = @(nssm get \$svc AppEnvironmentExtra)
+if (\$lines.Count -eq 0) { Write-Host 'ERROR: Could not read the service environment via nssm get'; exit 1 }
+\$dbLine = \$null
+\$secretFound = \$false
+foreach (\$line in \$lines) {
+    if (\$line -like 'QASIP_HUB_DATABASE_URL=*') { \$dbLine = \$line }
+    if (\$line -like 'QASIP_HUB_SECRET_KEY=*') { \$secretFound = \$true }
+}
+if (-not \$dbLine) {
+    \$joined = [string]::Join(' ', \$lines)
+    \$m2 = [regex]::Match(\$joined, 'QASIP_HUB_DATABASE_URL=(\\S+)')
+    if (\$m2.Success) { \$dbLine = 'QASIP_HUB_DATABASE_URL=' + \$m2.Groups[1].Value }
+}
+if (-not \$dbLine) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }
+\$url = \$dbLine.Substring('QASIP_HUB_DATABASE_URL='.Length)
+\$atPos = \$url.LastIndexOf('@')
+\$hostPart = ''
+if (\$atPos -ge 0) { \$hostPart = \$url.Substring(\$atPos) }
+Write-Host "Stored service DATABASE_URL host part: \$hostPart"
+if (\$hostPart -notlike '@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub*') { Write-Host 'ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub - stored host part is: \$hostPart'; exit 1 }
+if (-not \$secretFound) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }
+Write-Host '[OK] Service DATABASE_URL verified: present and uses ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub (only host part printed, password never printed).'
 Write-Host '[OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).'
 exit 0
 """
@@ -665,8 +682,8 @@ exit 0
 
                         rem Verify what NSSM actually stored, via the
                         rem PowerShell script written in the script block
-                        rem above (kh_verify_env.ps1). It prints the stored
-                        rem DATABASE_URL with the password masked, checks
+                        rem above (kh_verify_env.ps1). It prints only the
+                        rem host part of the stored DATABASE_URL, checks
                         rem QASIP_HUB_SECRET_KEY is present, and fails
                         rem (exit 1) if the URL is missing or does not use
                         rem ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}.
@@ -678,7 +695,7 @@ exit 0
                         powershell -NoProfile -ExecutionPolicy Bypass -File "%WORKSPACE%\\kh_verify_env.ps1"
                         if !ERRORLEVEL! NEQ 0 (
                             del "%WORKSPACE%\\kh_verify_env.ps1" >nul 2>&1
-                            echo ERROR: Service environment verification FAILED - see the masked DATABASE_URL printed above.
+                            echo ERROR: Service environment verification FAILED - see the stored DATABASE_URL host part printed above.
                             exit /b 1
                         )
                         del "%WORKSPACE%\\kh_verify_env.ps1" >nul 2>&1
