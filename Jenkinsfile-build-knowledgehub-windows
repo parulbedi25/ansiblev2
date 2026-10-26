@@ -1016,6 +1016,46 @@ exit 0
                     )
                     echo Manual check: open ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ ^(or http://localhost:8000/^) and confirm API calls go to ${env.QASIP_HUB_PUBLIC_URL}
 
+                    rem Explicit acceptance check for the Admin UI as a
+                    rem user opens it: http://localhost:8000/ must answer
+                    rem (Nginx server on :8000, configured by the Ansible
+                    rem nginx role; this pipeline only publishes files).
+                    curl.exe --fail --silent http://localhost:8000/ >nul
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo WARNING: Admin UI not reachable at http://localhost:8000/
+                        echo Nginx is managed by Ansible provisioning - re-run provisioning
+                        echo so roles/nginx deploys the :8000 server block and restarts
+                        echo ATMS-Nginx, then check: netstat -ano ^| findstr :8000
+                        echo This is a WARNING only - the UI files ARE published.
+                    ) else (
+                        echo [OK] Admin UI reachable: http://localhost:8000/
+                    )
+
+                    rem Backend health THROUGH the Knowledge Hub domain.
+                    rem The domain entry point is Nginx on :8000 (there is
+                    rem no TLS and no :80/:443 listener in this setup, so
+                    rem https://<domain>/health without a port cannot
+                    rem work): Nginx serves the Admin UI on 8000 and
+                    rem proxies /health and /mcp/ to the backend on 8037.
+                    rem   curl http://<domain>:8000/health
+                    rem   curl http://<domain>:8000/mcp/tools
+                    echo Checking backend health via Knowledge Hub domain ${env.KNOWLEDGE_HUB_HOSTNAME} ...
+                    curl.exe --fail --silent ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/health >nul
+                    if %ERRORLEVEL% NEQ 0 (
+                        echo WARNING: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/health not reachable via the domain yet.
+                        echo Backend is verified directly on localhost:${env.QASIP_HUB_PORT} above - check
+                        echo the hosts entry for ${env.KNOWLEDGE_HUB_HOSTNAME}, ATMS-Nginx running with the
+                        echo :8000 server block ^(Ansible provisioning^), and inbound TCP 8000.
+                    ) else (
+                        echo [OK] Backend /health via domain: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/health
+                        curl.exe --fail --silent ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/mcp/tools >nul
+                        if %ERRORLEVEL% NEQ 0 (
+                            echo WARNING: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/mcp/tools failed via the domain ^(localhost and /health checks passed^).
+                        ) else (
+                            echo [OK] Backend /mcp/tools via domain: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/mcp/tools
+                        )
+                    )
+
                     echo All deployment checks passed.
                     rem Same stale-ERRORLEVEL guard as the health stage: the
                     rem admin-UI WARNING path ends after a failed curl.
