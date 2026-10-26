@@ -2,7 +2,8 @@
  * Jenkinsfile-build-knowledgehub-windows
  * ============================================================================
  * Builds & deploys the Knowledge Hub (backend + admin frontend) on a Windows
- * target where the code already lives at D:\copper-code\AI-Python.
+ * target where the code already lives at D:\<project>-code\AI-Python
+ * (<project> = first part of PROJECT_TARGET_MACHINE, e.g. copper).
  *
  * Prerequisites (done ONCE by Ansible provisioning - windows.yml):
  *   - postgres14 role : PostgreSQL 18 on port 5433, database qasip_hub
@@ -84,7 +85,7 @@ pipeline {
         // Ansible (plain `python` on these machines is still Python 3.11)
 
         // ---- Knowledge Hub specific (code is already on the machine) ----
-        KNOWLEDGE_HUB_CODE_DIR     = 'D:\\copper-code\\AI-Python'
+        KNOWLEDGE_HUB_CODE_DIR     = "D:\\${KNOWLEDGE_HUB_PROJECT_NAME}-code\\AI-Python"
         KNOWLEDGE_HUB_BACKEND_DIR  = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub"
         KNOWLEDGE_HUB_FRONTEND_DIR = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub_Admin"
         KNOWLEDGE_HUB_VENV_DIR     = "${KNOWLEDGE_HUB_BACKEND_DIR}\\.venv"

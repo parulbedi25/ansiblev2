@@ -32,7 +32,7 @@ nginx_listen_port: "6003"
 #     Knowledge_Hub) - a Python/uvicorn app run by the NSSM service
 #     QASIP-KnowledgeHub on port 8037. Nginx never serves files from
 #     this directory; it only reverse-proxies to it (below).
-#   - Frontend: knowledge_hub_frontend_dir (D:\copper-code\AI-Python\
+#   - Frontend: knowledge_hub_frontend_dir (D:\<project>-code\AI-Python\
 #     Knowledge_Hub_Admin) - built by Jenkinsfile-build-knowledgehub-
 #     windows (npm run build -> dist) and the built files are PUBLISHED
 #     (copied) into the Nginx root below. Nginx never serves files
@@ -54,6 +54,14 @@ knowledge_hub_backend_port: "8037"
 # Separate application directories on the target (code is already on the
 # machine - Ansible does not create or modify these, they are recorded
 # here so the layout is explicit and can be checked during provisioning).
-knowledge_hub_backend_dir: 'D:\copper-code\AI-Python\Knowledge_Hub'
-knowledge_hub_frontend_dir: 'D:\copper-code\AI-Python\Knowledge_Hub_Admin'
-knowledge_hub_frontend_dist_dir: 'D:\copper-code\AI-Python\Knowledge_Hub_Admin\dist'
+# The "<project>-code" folder is DYNAMIC: it follows the project name
+# (provisioning passes -e project_name=..., e.g. "copper" ->
+# D:\copper-code; "silver" -> D:\silver-code). "copper" is only the
+# fallback when no project name is supplied. This matches the Knowledge
+# Hub pipeline, which derives the same folder from the first part of
+# PROJECT_TARGET_MACHINE (copper-dev-<ip> -> copper).
+knowledge_hub_project_name: "{{ project_name | default('copper') }}"
+knowledge_hub_code_dir: 'D:\{{ knowledge_hub_project_name }}-code\AI-Python'
+knowledge_hub_backend_dir: '{{ knowledge_hub_code_dir }}\Knowledge_Hub'
+knowledge_hub_frontend_dir: '{{ knowledge_hub_code_dir }}\Knowledge_Hub_Admin'
+knowledge_hub_frontend_dist_dir: '{{ knowledge_hub_frontend_dir }}\dist'

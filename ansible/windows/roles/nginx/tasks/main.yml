@@ -162,8 +162,8 @@
   win_stat:
     path: "{{ item }}"
   loop:
-    - "{{ knowledge_hub_backend_dir | default('D:\\copper-code\\AI-Python\\Knowledge_Hub') }}"
-    - "{{ knowledge_hub_frontend_dir | default('D:\\copper-code\\AI-Python\\Knowledge_Hub_Admin') }}"
+    - "{{ knowledge_hub_backend_dir | default('D:\\\\' + (project_name | default('copper')) + '-code\\\\AI-Python\\\\Knowledge_Hub') }}"
+    - "{{ knowledge_hub_frontend_dir | default('D:\\\\' + (project_name | default('copper')) + '-code\\\\AI-Python\\\\Knowledge_Hub_Admin') }}"
   register: knowledge_hub_code_dirs
   changed_when: false
   when: knowledge_hub_enabled | bool
