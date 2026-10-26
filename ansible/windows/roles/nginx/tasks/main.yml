@@ -162,8 +162,8 @@
   win_stat:
     path: "{{ item }}"
   loop:
-    - "{{ knowledge_hub_backend_dir }}"
-    - "{{ knowledge_hub_frontend_dir }}"
+    - "{{ knowledge_hub_backend_dir | default('D:\\\\' + (project_name | default('copper')) + '-code\\\\AI-Python\\\\Knowledge_Hub') }}"
+    - "{{ knowledge_hub_frontend_dir | default('D:\\\\' + (project_name | default('copper')) + '-code\\\\AI-Python\\\\Knowledge_Hub_Admin') }}"
   register: knowledge_hub_code_dirs
   changed_when: false
   when: knowledge_hub_enabled | bool
@@ -182,7 +182,7 @@
 
 - name: Ensure Knowledge Hub UI root directory exists
   win_file:
-    path: "{{ knowledge_hub_ui_root_path }}"
+    path: "{{ nginx_root_path }}\\{{ knowledge_hub_root }}"
     state: directory
   when: knowledge_hub_enabled | bool
 
