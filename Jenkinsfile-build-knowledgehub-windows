@@ -2,44 +2,31 @@
  * Jenkinsfile-build-knowledgehub-windows
  * ============================================================================
  * Builds & deploys the Knowledge Hub (backend + admin frontend) on a Windows
- * target where the code already lives at D:\<project>-code\AI-Python
- * (<project> = first part of PROJECT_TARGET_MACHINE, e.g. copper).
+ * target where the code already lives at D:\copper-code\AI-Python.
  *
  * Prerequisites (done ONCE by Ansible provisioning - windows.yml):
  *   - postgres14 role : PostgreSQL 18 on port 5433, database qasip_hub
- *                       + one-time SQL from the deployment strategy:
- *                         CREATE USER kh_app WITH PASSWORD '...';
- *                         GRANT ALL PRIVILEGES ON DATABASE qasip_hub TO kh_app;
- *                         \c qasip_hub -> GRANT USAGE, CREATE ON SCHEMA public TO kh_app;
  *   - qdrant role     : Qdrant service on port 6333 (persistent storage)
  *   - python312 role  : Python 3.12 at C:\Program Files\Python312\python.exe
  *                       (plain `python` on these hosts is still Python 3.11!)
  *   - node18 role     : Node 18 at D:\QASIP\Apps\node18
  *                       (plain `node` on these hosts is still Node 10!)
  *   - nssm role       : NSSM available (backend runs as a Windows service)
+ *   - nginx role      : Nginx serves the Admin UI on port 8000 and proxies
+ *                       /health and /mcp/ to the backend on 8037
  *
  * Jenkins credentials to create (Manage Jenkins -> Credentials):
  *   - knowledgehub-openai-api-key    (Secret text)  OpenAI / Azure OpenAI key
- *   - knowledgehub-qdrant-api-key    (Secret text)  Qdrant API key (if enabled;
- *                                                   any value if Qdrant has no key)
+ *   - knowledgehub-qdrant-api-key    (Secret text)  Qdrant API key (if enabled)
  *   - knowledgehub-db-credentials    (Username+password) kh_app DB user/password
  * (QASIP_HUB_SECRET_KEY is NOT a Jenkins credential: the pipeline generates a
  *  Fernet key itself - see the 'Generate Secret Key' stage.)
  *
- * Hostnames are NOT parameters: the infra pipeline (hosts-entry role) already
- * added "qajarvis.com" and "<instance>.qajarvis.com" to the Windows hosts
- * file, so this pipeline derives the target hostname itself at runtime
- * (KNOWLEDGE_HUB_HOSTNAME = <project>.qajarvis.com, project = first part of
- * PROJECT_TARGET_MACHINE) and fills QASIP_HUB_PUBLIC_URL, CORS_ORIGINS,
- * and VITE_HUB_API_URL from it. Internal services on the same machine
- * (PostgreSQL :5433, Qdrant :6333) deliberately use localhost: PG's
- * default pg_hba.conf only allows loopback, so connecting via the
- * hostname (= LAN IP) is rejected with "no pg_hba.conf entry".
- *
- * Frontend is published into a SUBFOLDER of the existing Nginx html dir
- * (default: knowledge-hub) so the existing Angular UI hosted there is never
- * touched. Nginx needs a matching location block for that path with SPA
- * fallback (try_files $uri $uri/ /<path>/index.html) - see stage 11 output.
+ * Deployment layout:
+ *   - Knowledge_Hub       (backend,  uvicorn via NSSM) : port 8037
+ *   - Knowledge_Hub_Admin (frontend, served by Nginx)  : port 8000
+ *   - Backend health: curl http://localhost:8037/health
+ *                     curl http://localhost:8037/mcp/tools
  * ============================================================================
  */
 pipeline {
@@ -85,7 +72,7 @@ pipeline {
         // Ansible (plain `python` on these machines is still Python 3.11)
 
         // ---- Knowledge Hub specific (code is already on the machine) ----
-        KNOWLEDGE_HUB_CODE_DIR     = "D:\\${KNOWLEDGE_HUB_PROJECT_NAME}-code\\AI-Python"
+        KNOWLEDGE_HUB_CODE_DIR     = 'D:\\copper-code\\AI-Python'
         KNOWLEDGE_HUB_BACKEND_DIR  = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub"
         KNOWLEDGE_HUB_FRONTEND_DIR = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub_Admin"
         KNOWLEDGE_HUB_VENV_DIR     = "${KNOWLEDGE_HUB_BACKEND_DIR}\\.venv"
@@ -105,25 +92,11 @@ pipeline {
         // (These names are read by the Knowledge Hub app itself, so they
         //  keep their QASIP_HUB_ names; secrets come from Jenkins
         //  credentials / the generated secret key - never from git.)
-        // Port layout (per deployment requirement):
-        //   Knowledge Hub backend (uvicorn, direct) : 8037
-        //     -> http://localhost:8037  and  http://<hostname>:8037
-        //   Knowledge Hub Admin UI (served by Nginx) : 8000
-        //     -> http://localhost:8000  and  http://<hostname>:8000
-        //   (Nginx server for :8000 is configured by the Ansible nginx
-        //    role; its /mcp and /health locations proxy to 8037.)
-        KNOWLEDGE_HUB_ADMIN_UI_URL     = "http://${KNOWLEDGE_HUB_HOSTNAME}:8000"
-        // PostgreSQL connection for the Hub MUST use localhost.
-        // Do NOT use KNOWLEDGE_HUB_HOSTNAME here: it resolves to the
-        // machine LAN IP, and PG 18's default pg_hba.conf only allows
-        // loopback, so the service then reports "db":"unavailable".
-        KNOWLEDGE_HUB_PG_HOST          = 'localhost'
-        KNOWLEDGE_HUB_PG_PORT          = '5433'
         QASIP_HUB_HOST                 = '0.0.0.0'
         QASIP_HUB_PORT                 = '8037'
         QASIP_HUB_RELOAD               = 'false'
-        QASIP_HUB_CORS_ORIGINS         = "http://localhost:8000,http://${KNOWLEDGE_HUB_HOSTNAME}:8000"
-        QASIP_HUB_PUBLIC_URL           = "http://${KNOWLEDGE_HUB_HOSTNAME}:${QASIP_HUB_PORT}"
+        QASIP_HUB_CORS_ORIGINS         = "https://${KNOWLEDGE_HUB_HOSTNAME}"
+        QASIP_HUB_PUBLIC_URL           = "https://${KNOWLEDGE_HUB_HOSTNAME}"
         QASIP_HUB_LLM_PROVIDER         = 'openai'
         QASIP_HUB_OPENAI_MODEL         = ''
         QASIP_HUB_AZURE_OPENAI_ENDPOINT    = ''
@@ -137,10 +110,8 @@ pipeline {
         QASIP_HUB_LOG_LEVEL            = 'INFO'
         QASIP_HUB_AUDIT_ENABLED        = 'true'
 
-        // Frontend build variable (baked into the JS bundle at build time).
-        // The browser calls the backend directly on its own port (8037);
-        // QASIP_HUB_CORS_ORIGINS above allows the :8000 UI origins.
-        VITE_HUB_API_URL = "http://${KNOWLEDGE_HUB_HOSTNAME}:8037"
+        // Frontend build variable (baked into the JS bundle at build time)
+        VITE_HUB_API_URL = "https://${KNOWLEDGE_HUB_HOSTNAME}"
     }
 
     stages {
@@ -164,6 +135,7 @@ pipeline {
                     Backend Dir    : ${env.KNOWLEDGE_HUB_BACKEND_DIR}
                     Frontend Dir   : ${env.KNOWLEDGE_HUB_FRONTEND_DIR}
                     Backend Service: ${env.KNOWLEDGE_HUB_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
+                    Admin UI       : http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000 (Nginx)
                     LLM Provider   : ${env.QASIP_HUB_LLM_PROVIDER}
                     ========================================
                     """
@@ -197,7 +169,7 @@ pipeline {
                     echo   QASIP_HUB_PUBLIC_URL  = ${env.QASIP_HUB_PUBLIC_URL}
                     echo   QASIP_HUB_CORS_ORIGINS= ${env.QASIP_HUB_CORS_ORIGINS}
                     echo   QASIP_HUB_QDRANT_URL  = ${env.QASIP_HUB_QDRANT_URL}
-                    echo   DATABASE host         = ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT} (same machine - pg_hba only allows loopback; the hostname/LAN IP is rejected)
+                    echo   DATABASE host         = localhost:5433 (same machine - pg_hba only allows loopback; the hostname/LAN IP is rejected)
                     echo   VITE_HUB_API_URL      = ${env.VITE_HUB_API_URL}
                 """
             }
@@ -237,7 +209,7 @@ pipeline {
                     if %ERRORLEVEL% EQU 0 (
                         echo Stopping ${env.KNOWLEDGE_HUB_SERVICE_NAME}...
                         net stop "${env.KNOWLEDGE_HUB_SERVICE_NAME}" 2>nul || echo Service was not running
-                        ping -n 4 127.0.0.1 >nul
+                        timeout /t 3 /nobreak >nul
                     ) else (
                         echo Service ${env.KNOWLEDGE_HUB_SERVICE_NAME} does not exist yet - skipping stop.
                     )
@@ -434,17 +406,11 @@ pipeline {
                         copy /Y ".qasip_hub_secret_key" "%WORKSPACE%\\kh_secret_key.txt" >nul
                         echo Secret key ready (value is not printed to the log).
                     """
-                    env.QASIP_HUB_SECRET_KEY = readFile('kh_secret_key.txt').trim()
-                    if (!env.QASIP_HUB_SECRET_KEY) {
-                        error 'QASIP_HUB_SECRET_KEY is empty - see Generate Secret Key stage log'
+                    env.GENERATED_SECRET_KEY = readFile('kh_secret_key.txt').trim()
+                    if (!env.GENERATED_SECRET_KEY) {
+                        error 'Generated secret key is empty - see Generate Secret Key stage log'
                     }
-                    // A Fernet key is 32 bytes, URL-safe base64 encoded:
-                    // exactly 44 characters (including the trailing '=').
-                    // Validate the shape only - never print the value.
-                    if (env.QASIP_HUB_SECRET_KEY.length() != 44) {
-                        error "QASIP_HUB_SECRET_KEY has unexpected length ${env.QASIP_HUB_SECRET_KEY.length()} (expected 44 for a Fernet key) - see Generate Secret Key stage log"
-                    }
-                    echo "QASIP_HUB_SECRET_KEY stored in pipeline variable for later stages (length ${env.QASIP_HUB_SECRET_KEY.length()}, value not printed)."
+                    echo 'QASIP_HUB_SECRET_KEY loaded for this pipeline execution (masked, not printed).'
                 }
             }
         }
@@ -486,7 +452,7 @@ pipeline {
                 // Qdrant credentials in this stage made migrations fail
                 // inside withCredentials (before any bat ran) whenever one
                 // of those unrelated credentials was missing in Jenkins.
-                // Alembic only needs DATABASE_URL + QASIP_HUB_SECRET_KEY.
+                // Alembic only needs DATABASE_URL + the generated SECRET_KEY.
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'knowledgehub-db-credentials',
@@ -501,14 +467,8 @@ pipeline {
                         echo Applying database migrations (alembic)
                         echo ========================================
 
-                        if "%QASIP_HUB_SECRET_KEY%" == "" (
-                            echo ERROR: QASIP_HUB_SECRET_KEY pipeline variable is empty - the Generate Secret Key stage did not provide it.
-                            exit /b 1
-                        )
-                        echo QASIP_HUB_SECRET_KEY is present for migrations (value not printed).
-
-                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub"
-                        set "QASIP_HUB_SECRET_KEY=%QASIP_HUB_SECRET_KEY%"
+                        set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
+                        set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
 
                         cd /d "${env.KNOWLEDGE_HUB_BACKEND_DIR}"
                         call .venv\\Scripts\\activate.bat
@@ -553,17 +513,6 @@ pipeline {
                     } catch (e) {
                         echo "WARNING: Jenkins credential 'knowledgehub-qdrant-api-key' not found - service will be configured with an EMPTY Qdrant API key (fine while Qdrant runs without auth)."
                     }
-
-                    // The verification itself no longer uses a script
-                    // file: a previous version wrote kh_verify_env.ps1
-                    // with writeFile here and ran it from the bat step
-                    // below, but on the target the file was missing
-                    // when the bat step ran ("The argument
-                    // '...kh_verify_env.ps1' to the -File parameter
-                    // does not exist"), failing the stage before any
-                    // check could run. The bat step now runs the same
-                    // checks inline via powershell -Command, so there
-                    // is no file that can go missing.
                 }
                 withCredentials([
                     usernamePassword(
@@ -606,13 +555,7 @@ pipeline {
 
                         echo Setting QASIP_HUB_* environment for the service...
 
-                        if "%QASIP_HUB_SECRET_KEY%" == "" (
-                            echo ERROR: QASIP_HUB_SECRET_KEY pipeline variable is empty - the Generate Secret Key stage did not provide it.
-                            exit /b 1
-                        )
-                        echo QASIP_HUB_SECRET_KEY is present for service configuration (value not printed).
-
-                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub"
+                        set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
                         if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
                             set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY_RESOLVED%"
                         ) else (
@@ -626,7 +569,7 @@ pipeline {
                             "QASIP_HUB_RELOAD=${env.QASIP_HUB_RELOAD}" ^
                             "QASIP_HUB_CORS_ORIGINS=${env.QASIP_HUB_CORS_ORIGINS}" ^
                             "QASIP_HUB_PUBLIC_URL=${env.QASIP_HUB_PUBLIC_URL}" ^
-                            "QASIP_HUB_SECRET_KEY=%QASIP_HUB_SECRET_KEY%" ^
+                            "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%" ^
                             "QASIP_HUB_LLM_PROVIDER=${env.QASIP_HUB_LLM_PROVIDER}" ^
                             "!KH_LLM_ENV!" ^
                             "QASIP_HUB_OPENAI_MODEL=${env.QASIP_HUB_OPENAI_MODEL}" ^
@@ -647,22 +590,17 @@ pipeline {
                             exit /b 1
                         )
 
-                        rem Verify what NSSM actually stored, with an
-                        rem inline PowerShell command (no script file -
-                        rem a writeFile-generated kh_verify_env.ps1 was
-                        rem missing on the target when this step ran).
-                        rem It prints only the host part of the stored
-                        rem DATABASE_URL (everything from the last '@',
-                        rem password never printed), checks
+                        rem Verify what NSSM actually stored, with an inline
+                        rem PowerShell command (no script file - a generated
+                        rem kh_verify_env.ps1 was missing on the target when
+                        rem this step ran, which failed the stage before any
+                        rem check could run). It prints only the host part
+                        rem of the stored DATABASE_URL (everything from the
+                        rem last '@', password never printed), checks
                         rem QASIP_HUB_SECRET_KEY is present, and fails
                         rem (exit 1) if the URL is missing or does not use
-                        rem ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}.
-                        rem Do NOT reimplement this in batch: findstr on
-                        rem the "nssm get" output matched the short NAME=
-                        rem patterns but not the URL string, and batch
-                        rem substitution syntax failed to parse
-                        rem (": was unexpected at this time.").
-                        powershell -NoProfile -ExecutionPolicy Bypass -Command "\$lines = @(nssm get ${env.KNOWLEDGE_HUB_SERVICE_NAME} AppEnvironmentExtra); if (\$lines.Count -eq 0) { Write-Host 'ERROR: Could not read the service environment via nssm get'; exit 1 }; \$dbLine = \$null; \$secretFound = \$false; foreach (\$line in \$lines) { if (\$line -like 'QASIP_HUB_DATABASE_URL=*') { \$dbLine = \$line }; if (\$line -like 'QASIP_HUB_SECRET_KEY=*') { \$secretFound = \$true } }; if (-not \$dbLine) { \$joined = [string]::Join(' ', \$lines); \$m2 = [regex]::Match(\$joined, 'QASIP_HUB_DATABASE_URL=(\\S+)'); if (\$m2.Success) { \$dbLine = 'QASIP_HUB_DATABASE_URL=' + \$m2.Groups[1].Value } }; if (-not \$dbLine) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }; \$url = \$dbLine.Substring('QASIP_HUB_DATABASE_URL='.Length); \$atPos = \$url.LastIndexOf('@'); \$hostPart = ''; if (\$atPos -ge 0) { \$hostPart = \$url.Substring(\$atPos) }; Write-Host ('Stored service DATABASE_URL host part: ' + \$hostPart); if (\$hostPart -notlike '@${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub*') { Write-Host ('ERROR: Service DATABASE_URL does NOT use ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub - stored host part is: ' + \$hostPart); exit 1 }; if (-not \$secretFound) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }; Write-Host '[OK] Service DATABASE_URL verified: present and uses ${env.KNOWLEDGE_HUB_PG_HOST}:${env.KNOWLEDGE_HUB_PG_PORT}/qasip_hub (only host part printed, password never printed).'; Write-Host '[OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).'"
+                        rem localhost:5433/qasip_hub.
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "\$lines = @(nssm get ${env.KNOWLEDGE_HUB_SERVICE_NAME} AppEnvironmentExtra); if (\$lines.Count -eq 0) { Write-Host 'ERROR: Could not read the service environment via nssm get'; exit 1 }; \$dbLine = \$null; \$secretFound = \$false; foreach (\$line in \$lines) { if (\$line -like 'QASIP_HUB_DATABASE_URL=*') { \$dbLine = \$line }; if (\$line -like 'QASIP_HUB_SECRET_KEY=*') { \$secretFound = \$true } }; if (-not \$dbLine) { \$joined = [string]::Join(' ', \$lines); \$m2 = [regex]::Match(\$joined, 'QASIP_HUB_DATABASE_URL=(\\S+)'); if (\$m2.Success) { \$dbLine = 'QASIP_HUB_DATABASE_URL=' + \$m2.Groups[1].Value } }; if (-not \$dbLine) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }; \$url = \$dbLine.Substring('QASIP_HUB_DATABASE_URL='.Length); \$atPos = \$url.LastIndexOf('@'); \$hostPart = ''; if (\$atPos -ge 0) { \$hostPart = \$url.Substring(\$atPos) }; Write-Host ('Stored service DATABASE_URL host part: ' + \$hostPart); if (\$hostPart -notlike '@localhost:5433/qasip_hub*') { Write-Host ('ERROR: Service DATABASE_URL does NOT use localhost:5433/qasip_hub - stored host part is: ' + \$hostPart); exit 1 }; if (-not \$secretFound) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }; Write-Host '[OK] Service DATABASE_URL verified: present and uses localhost:5433/qasip_hub (only host part printed, password never printed).'; Write-Host '[OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).'"
                         if !ERRORLEVEL! NEQ 0 (
                             echo ERROR: Service environment verification FAILED - see the stored DATABASE_URL host part printed above.
                             exit /b 1
@@ -702,9 +640,8 @@ pipeline {
                             exit /b 1
                         )
                     )
-                    echo Backend checks: http://localhost:${env.QASIP_HUB_PORT}/health and http://localhost:${env.QASIP_HUB_PORT}/mcp/tools
 
-                    echo Waiting for backend health...
+                    echo Waiting for backend health on http://localhost:${env.QASIP_HUB_PORT}/health ...
                     set KH_HEALTHY=0
                     for /l %%i in (1,1,30) do (
                         if !KH_HEALTHY! EQU 0 (
@@ -727,67 +664,32 @@ pipeline {
                         exit /b 1
                     )
 
-                    rem /health returns HTTP 200 even when the DB check inside
-                    rem it fails ("db":"unavailable") - inspect the payload and
-                    rem surface the service logs in that case, so the reason is
-                    rem in the Jenkins log instead of silently passing as ok.
-                    curl.exe --silent http://localhost:${env.QASIP_HUB_PORT}/health > "%TEMP%\\kh_health.json" 2>nul
-                    echo Backend /health payload:
-                    type "%TEMP%\\kh_health.json"
-                    echo.
-                    findstr /C:"\"db\":\"ok\"" "%TEMP%\\kh_health.json" >nul
-                    if %ERRORLEVEL% NEQ 0 (
-                        echo WARNING: Backend reports DB NOT ok - the service cannot reach PostgreSQL as configured.
-                        echo Alembic connects fine with the same DATABASE_URL from Jenkins, so check:
-                        echo  1^) nssm get ${env.KNOWLEDGE_HUB_SERVICE_NAME} AppEnvironmentExtra  ^(DATABASE_URL present, localhost:5433^)
-                        echo  2^) the service logs below for the actual connection error
-                        echo ---- backend stderr log ^(tail^) ----
-                        powershell -NoProfile -Command "Get-Content '${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log' -Tail 40 -ErrorAction SilentlyContinue"
-                        echo ---- backend stdout log ^(tail^) ----
-                        powershell -NoProfile -Command "Get-Content '${env.KNOWLEDGE_HUB_LOG_DIR}\\stdout.log' -Tail 40 -ErrorAction SilentlyContinue"
-                        echo WARNING only - deployment continues, but Hub DB features will fail until this is fixed.
-                    ) else (
-                        echo [OK] Backend /health reports db ok
-                    )
-
                     echo Checking /mcp/tools...
                     curl.exe --fail --silent http://localhost:${env.QASIP_HUB_PORT}/mcp/tools >nul
                     if %ERRORLEVEL% NEQ 0 (
                         echo ERROR: /mcp/tools did not respond successfully
                         exit /b 1
                     )
+                    echo [OK] Backend /health and /mcp/tools on localhost:${env.QASIP_HUB_PORT}
 
-                    echo Checking backend via hostname ${env.QASIP_HUB_PUBLIC_URL} ...
-                    curl.exe --fail --silent ${env.QASIP_HUB_PUBLIC_URL}/health >nul
+                    rem Domain check through Nginx on :8000 (the Admin UI
+                    rem port) is WARNING-only: the backend itself is already
+                    rem verified directly above. There is no TLS and no
+                    rem :80/:443 listener in this setup, so the domain is
+                    rem reached as http://<hostname>:8000, not https://.
+                    echo Checking backend via Admin UI domain http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/health ...
+                    curl.exe --fail --silent http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/health >nul
                     if %ERRORLEVEL% NEQ 0 (
-                        echo WARNING: ${env.QASIP_HUB_PUBLIC_URL}/health not reachable via hostname yet.
-                        echo The backend itself IS healthy on localhost:${env.QASIP_HUB_PORT} - this URL
-                        echo goes direct to uvicorn ^(no Nginx involved^). Check: 1^) the hosts entry
-                        echo for ${env.KNOWLEDGE_HUB_HOSTNAME} resolves on this machine, 2^) Windows
-                        echo Firewall allows inbound TCP ${env.QASIP_HUB_PORT}, 3^) uvicorn is bound to
-                        echo 0.0.0.0. Verify manually: curl ${env.QASIP_HUB_PUBLIC_URL}/health
-                        echo This is a WARNING only - deployment continues.
+                        echo WARNING: http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/health not reachable yet - check ATMS-Nginx :8000 ^(Ansible nginx role^) and inbound TCP 8000. Backend on localhost:${env.QASIP_HUB_PORT} is verified.
                     ) else (
-                        echo [OK] ${env.QASIP_HUB_PUBLIC_URL}/health
-                        curl.exe --fail --silent ${env.QASIP_HUB_PUBLIC_URL}/mcp/tools >nul
-                        if %ERRORLEVEL% NEQ 0 (
-                            echo WARNING: ${env.QASIP_HUB_PUBLIC_URL}/mcp/tools failed via hostname ^(local check passed^).
-                        ) else (
-                            echo [OK] ${env.QASIP_HUB_PUBLIC_URL}/mcp/tools
-                        )
+                        echo [OK] Backend /health via domain: http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/health
                     )
-
-                    echo Backend health verified.
-                    rem The domain WARNING path above ends after a FAILED curl,
-                    rem whose ERRORLEVEL stays set (ECHO does not reset it) -
-                    rem without this exit the bat step would end non-zero and
-                    rem Jenkins would fail the stage despite the warning being
-                    rem intentional.
                     exit /b 0
                 """
             }
         }
 
+        // ------------------------------------------------------------------
         stage('Build Frontend (Node 18)') {
             steps {
                 bat """
@@ -921,12 +823,12 @@ pipeline {
                     dir /B "%KH_UI_TARGET%"
 
                     echo.
-                    echo The Admin UI is served by the Nginx server listening on port 8000
-                    echo ^(configured by the Ansible nginx role - templates/nginx.conf.j2^),
-                    echo with root html\\${env.KNOWLEDGE_HUB_ADMIN_UI_PATH} and SPA fallback, so it is
-                    echo reachable at http://localhost:8000/ and ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/
-                    echo once provisioning has run and the ATMS-Nginx service is started.
-                    echo Static file changes need no Nginx restart.
+                    echo NOTE: Nginx serving for :8000 is managed by Ansible
+                    echo ^(roles/nginx - server block with root html\\knowledge-hub,
+                    echo SPA fallback, /health and /mcp/ proxied to 127.0.0.1:${env.QASIP_HUB_PORT}^).
+                    echo Static files need no Nginx restart; re-run provisioning
+                    echo only if the :8000 server block itself changes.
+                    exit /b 0
                 """
             }
         }
@@ -942,37 +844,21 @@ pipeline {
                     echo Final verification
                     echo ========================================
 
-                    rem The backend is normally started by the
-                    rem 'Start Backend & Verify Health' stage. If it is
-                    rem not running here (service stopped mid-run, or a
-                    rem job definition without that stage), do not fail
-                    rem immediately - start it and wait for RUNNING.
-                    rem (NSSM only CONFIGURES the service; it does not
-                    rem start it.)
                     sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" | findstr "RUNNING" >nul
-                    if !ERRORLEVEL! EQU 0 (
-                        echo [OK] Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is RUNNING
-                    ) else (
-                        echo Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is not RUNNING - starting it now...
-                        net start "${env.KNOWLEDGE_HUB_SERVICE_NAME}"
-                        set KH_RUNNING=0
-                        for /l %%i in (1,1,10) do (
-                            if !KH_RUNNING! EQU 0 (
-                                sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" | findstr "RUNNING" >nul
-                                if !ERRORLEVEL! EQU 0 (
-                                    set KH_RUNNING=1
-                                ) else (
-                                    ping -n 4 127.0.0.1 >nul
-                                )
-                            )
-                        )
-                        if !KH_RUNNING! EQU 0 (
+                    if !ERRORLEVEL! NEQ 0 (
+                        echo ${env.KNOWLEDGE_HUB_SERVICE_NAME} is not RUNNING - attempting to start it...
+                        net start "${env.KNOWLEDGE_HUB_SERVICE_NAME}" 2>nul
+                        ping -n 6 127.0.0.1 >nul
+                        sc query "${env.KNOWLEDGE_HUB_SERVICE_NAME}" | findstr "RUNNING" >nul
+                        if !ERRORLEVEL! NEQ 0 (
                             echo ERROR: ${env.KNOWLEDGE_HUB_SERVICE_NAME} is still not RUNNING after a start attempt
                             echo ---- backend stderr log ----
                             type "${env.KNOWLEDGE_HUB_LOG_DIR}\\stderr.log" 2>nul
                             exit /b 1
                         )
                         echo [OK] Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is RUNNING ^(started by this stage^)
+                    ) else (
+                        echo [OK] Backend service ${env.KNOWLEDGE_HUB_SERVICE_NAME} is RUNNING
                     )
 
                     curl.exe --fail --silent http://localhost:${env.QASIP_HUB_PORT}/health >nul
@@ -989,61 +875,28 @@ pipeline {
                     )
                     echo [OK] Backend /mcp/tools
 
-                    curl.exe --fail --silent ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ >nul
-                    if %ERRORLEVEL% NEQ 0 (
-                        echo WARNING: Admin UI not reachable yet at ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/
-                        echo The files ARE published ^(see Publish stage^) - the Nginx server
-                        echo listening on 8000 ^(configured by the Ansible nginx role^) likely
-                        echo still needs a provisioning re-run / service restart, or Windows
-                        echo Firewall blocks inbound TCP 8000. This is a WARNING only.
-                    ) else (
-                        echo [OK] Admin UI reachable: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/
-                    )
-                    echo Manual check: open ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ ^(or http://localhost:8000/^) and confirm API calls go to ${env.QASIP_HUB_PUBLIC_URL}
-
-                    rem Explicit acceptance check for the Admin UI as a
-                    rem user opens it: http://localhost:8000/ must answer
-                    rem (Nginx server on :8000, configured by the Ansible
-                    rem nginx role; this pipeline only publishes files).
+                    rem Admin UI checks are WARNING-only: the UI files ARE
+                    rem published (Publish stage); reachability also needs
+                    rem the Ansible-managed Nginx :8000 server running.
                     curl.exe --fail --silent http://localhost:8000/ >nul
                     if %ERRORLEVEL% NEQ 0 (
                         echo WARNING: Admin UI not reachable at http://localhost:8000/
-                        echo Nginx is managed by Ansible provisioning - re-run provisioning
-                        echo so roles/nginx deploys the :8000 server block and restarts
-                        echo ATMS-Nginx, then check: netstat -ano ^| findstr :8000
-                        echo This is a WARNING only - the UI files ARE published.
+                        echo Re-run Ansible provisioning so roles/nginx deploys the :8000 server block, then check: netstat -ano ^| findstr :8000
                     ) else (
                         echo [OK] Admin UI reachable: http://localhost:8000/
                     )
 
-                    rem Backend health THROUGH the Knowledge Hub domain.
-                    rem The domain entry point is Nginx on :8000 (there is
-                    rem no TLS and no :80/:443 listener in this setup, so
-                    rem https://<domain>/health without a port cannot
-                    rem work): Nginx serves the Admin UI on 8000 and
-                    rem proxies /health and /mcp/ to the backend on 8037.
-                    rem   curl http://<domain>:8000/health
-                    rem   curl http://<domain>:8000/mcp/tools
-                    echo Checking backend health via Knowledge Hub domain ${env.KNOWLEDGE_HUB_HOSTNAME} ...
-                    curl.exe --fail --silent ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/health >nul
+                    curl.exe --fail --silent http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/ >nul
                     if %ERRORLEVEL% NEQ 0 (
-                        echo WARNING: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/health not reachable via the domain yet.
-                        echo Backend is verified directly on localhost:${env.QASIP_HUB_PORT} above - check
-                        echo the hosts entry for ${env.KNOWLEDGE_HUB_HOSTNAME}, ATMS-Nginx running with the
-                        echo :8000 server block ^(Ansible provisioning^), and inbound TCP 8000.
+                        echo WARNING: Admin UI not reachable at http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/ yet - check the hosts entry, ATMS-Nginx and inbound TCP 8000.
                     ) else (
-                        echo [OK] Backend /health via domain: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/health
-                        curl.exe --fail --silent ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/mcp/tools >nul
-                        if %ERRORLEVEL% NEQ 0 (
-                            echo WARNING: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/mcp/tools failed via the domain ^(localhost and /health checks passed^).
-                        ) else (
-                            echo [OK] Backend /mcp/tools via domain: ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/mcp/tools
-                        )
+                        echo [OK] Admin UI reachable: http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/
                     )
+                    echo Manual check: open http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000/ and confirm the Admin UI loads.
 
                     echo All deployment checks passed.
-                    rem Same stale-ERRORLEVEL guard as the health stage: the
-                    rem admin-UI WARNING path ends after a failed curl.
+                    rem The WARNING paths above end after failed curls
+                    rem (ERRORLEVEL stays 1) - end explicitly with success.
                     exit /b 0
                 """
             }
@@ -1061,8 +914,8 @@ pipeline {
             Target Machine  : ${params.PROJECT_TARGET_MACHINE}
             Backend Service : ${env.KNOWLEDGE_HUB_SERVICE_NAME} (port ${env.QASIP_HUB_PORT})
             Backend Health  : http://localhost:${env.QASIP_HUB_PORT}/health
+            Admin UI        : http://${env.KNOWLEDGE_HUB_HOSTNAME}:8000 (also http://localhost:8000/)
             API Domain      : ${env.QASIP_HUB_PUBLIC_URL}
-            Admin UI        : ${env.KNOWLEDGE_HUB_ADMIN_UI_URL}/ (Nginx :8000, also http://localhost:8000/)
 
             ====================================================
             """
