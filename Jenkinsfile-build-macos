@@ -251,7 +251,7 @@ while True:
     for item in data.get('items', []):
         for asset in item.get('assets', []):
             p = asset.get('path', '')
-            if 'script' in p and re.search(r'\.(js|json)$', p):
+            if 'script' in p and re.search(r'\\.(js|json)$', p):
                 urls.append(asset['downloadUrl'])
     token = data.get('continuationToken')
     if not token:
@@ -448,9 +448,9 @@ PYEOF
 import os, re
 path = os.path.join(os.environ['REPO_BASE_DIR'], 'AI-Python/test_script_generator/.env')
 content = open(path).read()
-content = re.sub(r'COUCH_DB_USER\s*=\s*".*?"', f'COUCH_DB_USER = "{os.environ["COUCH_USER"]}"', content)
-content = re.sub(r'COUCH_DB_PASSWORD\s*=\s*".*?"', f'COUCH_DB_PASSWORD = "{os.environ["COUCH_PASS"]}"', content)
-content = re.sub(r'OPENAI_API_KEY\s*=.*', f'OPENAI_API_KEY={os.environ["OPENAI_KEY"]}', content)
+content = re.sub(r'COUCH_DB_USER\\s*=\\s*".*?"', f'COUCH_DB_USER = "{os.environ["COUCH_USER"]}"', content)
+content = re.sub(r'COUCH_DB_PASSWORD\\s*=\\s*".*?"', f'COUCH_DB_PASSWORD = "{os.environ["COUCH_PASS"]}"', content)
+content = re.sub(r'OPENAI_API_KEY\\s*=.*', f'OPENAI_API_KEY={os.environ["OPENAI_KEY"]}', content)
 open(path, 'w').write(content)
 print("Python AI credentials injected successfully.")
 PYEOF
@@ -479,8 +479,8 @@ PYEOF
 import os, re
 path = os.path.join(os.environ['REPO_BASE_DIR'], 'atms-app/atms-web/src/main/resources/settings-local.properties')
 content = open(path).read()
-content = re.sub(r'jdbc\.username\s*=.*', f'jdbc.username = {os.environ["JDBC_USER"]}', content)
-content = re.sub(r'jdbc\.password\s*=.*', f'jdbc.password = {os.environ["JDBC_PASS"]}', content)
+content = re.sub(r'jdbc\\.username\\s*=.*', f'jdbc.username = {os.environ["JDBC_USER"]}', content)
+content = re.sub(r'jdbc\\.password\\s*=.*', f'jdbc.password = {os.environ["JDBC_PASS"]}', content)
 open(path, 'w').write(content)
 print("Java DB credentials injected successfully.")
 PYEOF
