@@ -240,10 +240,30 @@ else
 fi
 
 echo "== Homebrew =="
-if ! command -v brew >/dev/null 2>&1; then
-    echo "Installing Homebrew (can take 5-15 minutes - it downloads and pours bottles)..."
-    echo "$TARGET_PASSWORD" | sudo -S -v || true
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+# Intel note (Oct 2026): Homebrew 7's installer aborts on Intel with
+# "Homebrew on macOS is only supported on Apple Silicon processors!".
+# Homebrew 6.0.22 is the last release that still runs on Intel (Tier 3),
+# so on x86_64 we install that pinned tarball into /usr/local manually
+# and disable auto-update so brew does not upgrade itself to 7.
+# Apple Silicon Macs use the normal installer.
+if [ "$(uname -m)" = "x86_64" ]; then
+    export HOMEBREW_NO_AUTO_UPDATE=1
+fi
+if ! command -v brew >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/brew ] && [ ! -x /usr/local/bin/brew ]; then
+    if [ "$(uname -m)" = "x86_64" ]; then
+        BREW_VERSION="6.0.22"
+        echo "Intel Mac detected - installing Homebrew $BREW_VERSION (last Intel-compatible release) into /usr/local..."
+        echo "$TARGET_PASSWORD" | sudo -S mkdir -p /usr/local/Homebrew /usr/local/Cellar /usr/local/Frameworks /usr/local/bin /usr/local/etc /usr/local/include /usr/local/lib /usr/local/opt /usr/local/sbin /usr/local/share /usr/local/var 2>/dev/null || true
+        echo "$TARGET_PASSWORD" | sudo -S chown -R "$(whoami)":admin /usr/local/Homebrew /usr/local/Cellar /usr/local/Frameworks /usr/local/bin /usr/local/etc /usr/local/include /usr/local/lib /usr/local/opt /usr/local/sbin /usr/local/share /usr/local/var 2>/dev/null || true
+        curl -fsSL "https://github.com/Homebrew/brew/archive/refs/tags/${BREW_VERSION}.tar.gz" -o /tmp/homebrew.tar.gz
+        tar -xzf /tmp/homebrew.tar.gz --strip 1 -C /usr/local/Homebrew
+        rm -f /tmp/homebrew.tar.gz
+        ln -sfn ../Homebrew/bin/brew /usr/local/bin/brew
+    else
+        echo "Installing Homebrew (can take 5-15 minutes - it downloads and pours bottles)..."
+        echo "$TARGET_PASSWORD" | sudo -S -v || true
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
     # Wait for brew to become usable (max ~10 minutes, progress each minute)
     for i in $(seq 1 60); do
         if [ -x /opt/homebrew/bin/brew ] || [ -x /usr/local/bin/brew ] || command -v brew >/dev/null 2>&1; then
