@@ -212,7 +212,23 @@ echo "== Xcode Command Line Tools =="
 clt_ok() {
     xcode-select -p >/dev/null 2>&1 && clang --version >/dev/null 2>&1 && xcrun --find make >/dev/null 2>&1
 }
-if ! clt_ok; then
+# Skip the install entirely when Xcode / the Command Line Tools are
+# already installed AND working - only install when they are missing
+# or broken:
+SKIP_CLT=0
+if clt_ok; then
+    SKIP_CLT=1
+fi
+if [ "$SKIP_CLT" = "0" ] && [ -d "/Applications/Xcode.app" ]; then
+    # Full Xcode is installed but not selected (or the CLT next to it is
+    # stale) - point xcode-select at Xcode itself and check again.
+    echo "Full Xcode found at /Applications/Xcode.app - selecting it as the developer directory..."
+    echo "$TARGET_PASSWORD" | sudo -S xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+    if clt_ok; then
+        SKIP_CLT=1
+    fi
+fi
+if [ "$SKIP_CLT" = "0" ]; then
     if xcode-select -p >/dev/null 2>&1; then
         echo "Command Line Tools directory exists but the tools do not run - removing the stale install and reinstalling..."
         echo "$TARGET_PASSWORD" | sudo -S rm -rf /Library/Developer/CommandLineTools 2>/dev/null || true
@@ -251,7 +267,11 @@ if ! clt_ok; then
         exit 1
     fi
 else
-    echo "Already installed and working: $(xcode-select -p)"
+    if [ -d "/Applications/Xcode.app" ]; then
+        echo "Xcode already installed (/Applications/Xcode.app) - skipping Command Line Tools install."
+    else
+        echo "Xcode Command Line Tools already installed and working: $(xcode-select -p) - skipping install."
+    fi
     clang --version | head -1
 fi
 
