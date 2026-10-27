@@ -1,0 +1,787 @@
+/*
+ * Jenkinsfile-deploy-macos  (QASIP-Deploy-Mac)
+ * ============================================================================
+ * macOS counterpart of Jenkinsfile-Deploy-windows (QASIP-Deploy-Windows).
+ * Deploys the artifacts built by QASIP-Build-Mac onto a MacBook and
+ * verifies the app in a browser context — open http://localhost:6003
+ * in Safari, exactly like the Windows deployment is opened in a browser.
+ *
+ * macOS-specific differences vs the Windows version:
+ *   - `sh` steps only; no bat/PowerShell, no Windows services or NSSM.
+ *   - Services are managed as user processes with pid files under
+ *     ~/QASIP (start/stop helpers in each stage); Tomcat runs via its
+ *     own catalina.sh, Nginx via a private prefix under ~/QASIP/Apps.
+ *   - Paths mirror the Windows ones: D:\QASIP\Apps\... becomes
+ *     ~/QASIP/Apps/...; artifacts come from the Nexus /macos/ path.
+ *   - Same ports as Windows: Tomcat 8080, Nginx/UI 6003, Node 4001.
+ *   - Optional final stage opens the deployed UI in Safari
+ *     (OPEN_IN_SAFARI parameter; needs a logged-in GUI session on the
+ *     Mac — the curl checks are the authoritative verification).
+ * ============================================================================
+ */
+pipeline {
+    agent {
+        label params.PROJECT_TARGET_MACHINE.toLowerCase()
+    }
+
+    options {
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+        string(
+            name: 'PROJECT_TARGET_MACHINE',
+            description: 'Jenkins agent label where the application will be deployed. Format: project-environment-ip (example: copper-dev-10.10.3.150). Ensure the label exactly matches an existing Mac agent.'
+        )
+        string(
+            name: 'BUILD_VERSION',
+            description: 'Specify the build version to deploy. Required format: dd-MM-yyyy-v1.0.0-BuildNumber (example: 17-02-2026-v1.0.0-175).'
+        )
+        booleanParam(
+            name: 'OPEN_IN_SAFARI',
+            defaultValue: false,
+            description: 'After a successful deployment, open http://localhost:6003 in Safari on the Mac (requires the agent to run in a logged-in GUI session).'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+    }
+
+    environment {
+        PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
+        NEXUS_URL            = 'http://10.10.6.118:8081'
+        NEXUS_REPO           = 'atms-modules'
+        NEXUS_CREDENTIALS_ID = 'nexus-credentials'
+
+        // macOS layout (mirrors D:\QASIP\Apps on Windows)
+        QASIP_HOME           = "${env.HOME}/QASIP"
+        TOMCAT_HOME          = "${env.HOME}/QASIP/Apps/tomcat"
+        TOMCAT_WEBAPPS       = "${env.HOME}/QASIP/Apps/tomcat/webapps"
+        TOMCAT_LOGS          = "${env.HOME}/QASIP/Apps/tomcat/logs"
+        NGINX_ROOT_DIR       = "${env.HOME}/QASIP/Apps/nginx"
+        NGINX_HTML_DIR       = "${env.HOME}/QASIP/Apps/nginx/html"
+        AI_DEPLOY_DIR        = "${env.HOME}/QASIP/Apps/python-ai-service"
+        AI_APP_DIR           = "${env.HOME}/QASIP/Apps/python-ai-service/test_script_generator"
+        NODE_DEPLOY_DIR      = "${env.HOME}/QASIP/Apps/node-service"
+        PID_DIR              = "${env.HOME}/QASIP/run"
+        LOG_DIR              = "${env.HOME}/QASIP/logs"
+        ANSIBLE_OS           = "macos"
+        // Python is detected dynamically in the Setup stage (Homebrew /
+        // python.org installs), same idea as the Windows version.
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+            steps {
+                script {
+
+                    def missingParams = []
+                    def formatErrors  = []
+
+                    def targetMachine = params.PROJECT_TARGET_MACHINE?.trim()?.toLowerCase()
+                    def buildVersion  = params.BUILD_VERSION?.trim()
+                    def notificationEmails = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+
+                    if (!targetMachine) {
+                        missingParams << "PROJECT_TARGET_MACHINE"
+                    }
+                    if (!buildVersion) {
+                        missingParams << "BUILD_VERSION"
+                    }
+                    if (!notificationEmails) {
+                        missingParams << "NOTIFICATION_EMAILS"
+                    }
+
+                    // Validate PROJECT_TARGET_MACHINE
+                    if (targetMachine) {
+
+                        def machineRegex = /^[a-z]+-[a-z]+-(\d{1,3}\.){3}\d{1,3}$/
+
+                        if (!(targetMachine ==~ machineRegex)) {
+                            formatErrors << "PROJECT_TARGET_MACHINE format is invalid"
+                        } else {
+                            def ipPart = targetMachine.tokenize('-')[-1]
+                            def octets = ipPart.tokenize('.')
+
+                            for (octet in octets) {
+                                if (octet.toInteger() > 255) {
+                                    formatErrors << "PROJECT_TARGET_MACHINE contains invalid IP address"
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    // Validate BUILD_VERSION
+                    if (buildVersion) {
+
+                        def versionRegex = /^(0[1-9]|[12][0-9]|3[01])-(0[1-9]|1[0-2])-\d{4}-v\d+\.\d+\.\d+-\d+$/
+
+                        if (!(buildVersion ==~ versionRegex)) {
+                            formatErrors << "BUILD_VERSION format is invalid"
+                        }
+                    }
+
+                    // Validate NOTIFICATION_EMAILS
+                    if (notificationEmails) {
+
+                        def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+                        def emailList = notificationEmails
+                                            .split(',')
+                                            .collect { it.trim() }
+                                            .findAll { it }
+
+                        if (emailList.size() != emailList.unique().size()) {
+                            formatErrors << "Duplicate email addresses found in NOTIFICATION_EMAILS"
+                        }
+
+                        for (email in emailList) {
+                            if (!(email ==~ emailRegex)) {
+                                formatErrors << "Invalid email format detected: ${email}"
+                            }
+                        }
+                    }
+
+                    if (missingParams || formatErrors) {
+
+                        error """
+        ====================================================
+        ❌ BUILD FAILED - Parameter Validation Error
+        ====================================================
+
+        ${missingParams ? "Missing Parameters:\n${missingParams.join('\n')}\n" : ""}
+        ${formatErrors ? "Format Errors:\n${formatErrors.join('\n')}\n" : ""}
+
+        Expected Formats:
+
+        PROJECT_TARGET_MACHINE:
+        project-environment-ip
+        Example:
+        copper-dev-10.10.3.150
+
+        BUILD_VERSION:
+        dd-MM-yyyy-v1.0.0-BuildNumber
+        Example:
+        17-02-2026-v1.0.0-175
+
+        NOTIFICATION_EMAILS:
+        Comma-separated valid email addresses
+        Example:
+        user1@qasource.com, user2@qasource.com
+        ====================================================
+        """
+                    }
+
+                    echo "✅ All parameters validated successfully."
+                    echo "Target Machine → ${targetMachine}"
+                    echo "Build Version  → ${buildVersion}"
+                }
+                sh '''
+                    echo "========================================"
+                    echo "macOS agent check"
+                    echo "========================================"
+                    sw_vers
+                    uname -m
+                    command -v brew >/dev/null 2>&1 && brew --prefix || echo "brew not found in PATH"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 0: Stop all running services
+        // (Windows: net stop / taskkill. Mac: pid files + targeted
+        //  pkill on our own app paths only - never a blanket kill.)
+        // =============================================
+        stage('Stop All Services') {
+            steps {
+                sh '''
+                    set +e
+                    echo "========================================"
+                    echo "Stopping All Running Services"
+                    echo "========================================"
+
+                    mkdir -p "$PID_DIR" "$LOG_DIR"
+
+                    stop_by_pidfile() {
+                        name="$1"; pidfile="$PID_DIR/$name.pid"
+                        if [ -f "$pidfile" ]; then
+                            pid="$(cat "$pidfile" 2>/dev/null)"
+                            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                                echo "Stopping $name (pid $pid)..."
+                                kill "$pid" 2>/dev/null
+                                for i in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+                                kill -9 "$pid" 2>/dev/null
+                            fi
+                            rm -f "$pidfile"
+                        else
+                            echo "$name: no pid file (not started by this pipeline)"
+                        fi
+                    }
+
+                    echo "[1/4] Stopping Python AI service..."
+                    stop_by_pidfile python-ai
+                    pkill -f "$AI_APP_DIR/run.py" 2>/dev/null || echo "No Python AI process found"
+
+                    echo "[2/4] Stopping Node microservice..."
+                    stop_by_pidfile node-service
+                    pkill -f "$NODE_DEPLOY_DIR" 2>/dev/null || echo "No Node process found for $NODE_DEPLOY_DIR"
+
+                    echo "[3/4] Stopping Tomcat..."
+                    if [ -x "$TOMCAT_HOME/bin/catalina.sh" ]; then
+                        "$TOMCAT_HOME/bin/catalina.sh" stop 10 -force >/dev/null 2>&1 || echo "Tomcat was not running"
+                    else
+                        echo "Tomcat not installed at $TOMCAT_HOME (provisioning installs it)"
+                    fi
+
+                    echo "[4/4] Stopping Nginx..."
+                    if [ -f "$NGINX_ROOT_DIR/logs/nginx.pid" ]; then
+                        nginx -p "$NGINX_ROOT_DIR" -c "$NGINX_ROOT_DIR/conf/nginx.conf" -s quit 2>/dev/null || echo "Nginx was not running"
+                    else
+                        echo "Nginx was not running (no pid file)"
+                    fi
+
+                    echo "Waiting for processes to release file locks..."
+                    sleep 5
+
+                    echo "All services stopped."
+                    echo "========================================"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 1: Download all artifacts from Nexus
+        // =============================================
+        stage('Download Artifacts from Nexus') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: env.NEXUS_CREDENTIALS_ID,
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        def projectName = params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]
+                        sh """
+                            set -e
+                            ARTIFACT_DIR="${AI_DEPLOY_DIR}"
+
+                            echo "========================================"
+                            echo "Preparing AI-Python Artifact Directory"
+                            echo "========================================"
+
+                            rm -rf "\$ARTIFACT_DIR"
+                            mkdir -p "\$ARTIFACT_DIR"
+
+                            echo "Downloading AI-Python.zip (version: ${params.BUILD_VERSION})..."
+                            curl --fail --silent --show-error \\
+                              -u "\$NEXUS_USER:\$NEXUS_PASSWORD" \\
+                              -o "\$ARTIFACT_DIR/AI-Python.zip" \\
+                              "${env.NEXUS_URL}/repository/${env.NEXUS_REPO}/${projectName}/macos/${params.BUILD_VERSION}/AI-Python/AI-Python.zip"
+
+                            echo "Extracting AI-Python artifact..."
+                            unzip -qo "\$ARTIFACT_DIR/AI-Python.zip" -d "\$ARTIFACT_DIR"
+                            rm -f "\$ARTIFACT_DIR/AI-Python.zip"
+
+                            echo "AI-Python artifact ready at \$ARTIFACT_DIR"
+                        """
+
+                        sh """
+                            set -e
+                            ARTIFACT_DIR="${NODE_DEPLOY_DIR}"
+
+                            echo "========================================"
+                            echo "Preparing Node Microservice Artifact Directory"
+                            echo "========================================"
+
+                            rm -rf "\$ARTIFACT_DIR"
+                            mkdir -p "\$ARTIFACT_DIR"
+
+                            echo "Downloading atms-node-microservice.zip (version: ${params.BUILD_VERSION})..."
+                            curl --fail --silent --show-error \\
+                              -u "\$NEXUS_USER:\$NEXUS_PASSWORD" \\
+                              -o "\$ARTIFACT_DIR/node-microservice.zip" \\
+                              "${env.NEXUS_URL}/repository/${env.NEXUS_REPO}/${projectName}/macos/${params.BUILD_VERSION}/atms-node-microservice/atms-node-microservice.zip"
+
+                            echo "Extracting node microservice artifact..."
+                            unzip -qo "\$ARTIFACT_DIR/node-microservice.zip" -d "\$ARTIFACT_DIR"
+                            rm -f "\$ARTIFACT_DIR/node-microservice.zip"
+
+                            echo "Node microservice artifact ready at \$ARTIFACT_DIR"
+                        """
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 2: Setup Python venv and install deps
+        // =============================================
+        stage('Setup Virtual Environment and Install Dependencies') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Setting up Python Virtual Environment"
+                    echo "========================================"
+
+                    # Detect Python - Homebrew (Apple Silicon / Intel),
+                    # python.org framework installs, then PATH.
+                    PYTHON_EXE=""
+                    for candidate in \
+                        /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 \
+                        /usr/local/bin/python3.11 /usr/local/bin/python3 \
+                        /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+                        "$(command -v python3 2>/dev/null)"; do
+                        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+                            PYTHON_EXE="$candidate"
+                            break
+                        fi
+                    done
+
+                    if [ -z "$PYTHON_EXE" ]; then
+                        echo "ERROR: Python not found on this machine."
+                        echo "Searched: /opt/homebrew/bin, /usr/local/bin, /Library/Frameworks/Python.framework, PATH"
+                        echo "Please install Python 3.11 (brew install python@3.11) and retry."
+                        exit 1
+                    fi
+
+                    echo "Found Python at: $PYTHON_EXE"
+                    "$PYTHON_EXE" --version
+
+                    cd "$AI_APP_DIR"
+
+                    # Delete old environment if exists
+                    if [ -d ai_aenv ]; then
+                        echo "Removing existing virtual environment..."
+                        rm -rf ai_aenv
+                        echo "Old environment removed"
+                    fi
+
+                    echo "Creating new virtual environment..."
+                    "$PYTHON_EXE" -m venv ai_aenv
+                    [ -x ai_aenv/bin/python ] || { echo "ERROR: Failed to create virtual environment"; exit 1; }
+                    echo "Virtual environment created successfully"
+
+                    echo "Activating virtual environment and installing dependencies"
+                    . ai_aenv/bin/activate
+
+                    pip install -r Letest_requirements.txt
+                    pip install "flask[async]"
+
+                    echo "========================================"
+                    echo "Environment Ready - Dependencies installed successfully"
+                    echo "========================================"
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 3: Run Python Application
+        // (Windows: NSSM service ATMS-Python-AI. Mac: nohup process
+        //  tracked by a pid file; the provisioning pipeline can later
+        //  promote this to a launchd LaunchAgent if auto-start on
+        //  login is required.)
+        // =============================================
+        stage('Run Python Application') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Starting Python AI Application"
+                    echo "========================================"
+
+                    mkdir -p "$AI_APP_DIR/logs" "$PID_DIR"
+
+                    [ -x "$AI_APP_DIR/ai_aenv/bin/python" ] || { echo "ERROR: venv python not found - run the Setup stage first"; exit 1; }
+
+                    cd "$AI_APP_DIR"
+                    GIT_PYTHON_REFRESH=quiet nohup "$AI_APP_DIR/ai_aenv/bin/python" "$AI_APP_DIR/run.py" \
+                        > "$AI_APP_DIR/logs/stdout.log" 2> "$AI_APP_DIR/logs/stderr.log" &
+                    echo $! > "$PID_DIR/python-ai.pid"
+                    echo "Started ATMS-Python-AI equivalent (pid $(cat "$PID_DIR/python-ai.pid"))"
+
+                    sleep 5
+
+                    pid="$(cat "$PID_DIR/python-ai.pid")"
+                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                        echo "Python AI Application started successfully"
+                    else
+                        echo "ERROR: Python AI process is not running"
+                        echo "---- stderr log ----"
+                        tail -50 "$AI_APP_DIR/logs/stderr.log" 2>/dev/null || true
+                        exit 1
+                    fi
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 4: Deploy Node.js Microservice
+        // =============================================
+        stage('Deploy Node.js Microservice') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Starting Node.js Microservice"
+                    echo "========================================"
+
+                    mkdir -p "$NODE_DEPLOY_DIR/logs" "$PID_DIR"
+
+                    cd "$NODE_DEPLOY_DIR"
+                    # Entry point mirrors the Windows service (package.json
+                    # start script / index.js); adjust if the service uses
+                    # a different entry file.
+                    ENTRY="index.js"
+                    [ -f "$ENTRY" ] || ENTRY="$(node -e "try{console.log(require('./package.json').main||'index.js')}catch(e){console.log('index.js')}")"
+
+                    nohup node "$ENTRY" > "$NODE_DEPLOY_DIR/logs/stdout.log" 2> "$NODE_DEPLOY_DIR/logs/stderr.log" &
+                    echo $! > "$PID_DIR/node-service.pid"
+                    echo "Started Node microservice (pid $(cat "$PID_DIR/node-service.pid"))"
+
+                    sleep 5
+
+                    pid="$(cat "$PID_DIR/node-service.pid")"
+                    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                        echo "Node.js microservice started successfully"
+                    else
+                        echo "ERROR: Node microservice is not running"
+                        echo "---- stderr log ----"
+                        tail -50 "$NODE_DEPLOY_DIR/logs/stderr.log" 2>/dev/null || true
+                        exit 1
+                    fi
+                '''
+            }
+        }
+
+        // =============================================
+        // STAGE 5: Deploy WAR to Tomcat
+        // =============================================
+        stage('Deploy to Tomcat') {
+            steps {
+                sh """
+                    set -e
+                    echo "Removing old ROOT webapp..."
+                    cd "${TOMCAT_WEBAPPS}"
+
+                    rm -rf ROOT ROOT.war
+                    echo "Old ROOT removed (if any)"
+                """
+
+                withCredentials([usernamePassword(
+                    credentialsId: 'nexus-credentials',
+                    usernameVariable: 'NEXUS_USER',
+                    passwordVariable: 'NEXUS_PASSWORD'
+                )]) {
+                    sh """
+                        set -e
+                        echo "Downloading WAR from Nexus..."
+                        echo "Repository: ${NEXUS_REPO}"
+                        echo "Version: ${params.BUILD_VERSION}"
+
+                        cd "${TOMCAT_WEBAPPS}"
+
+                        curl -f -u "\$NEXUS_USER:\$NEXUS_PASSWORD" \\
+                          -o ROOT.war \\
+                          "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/macos/${params.BUILD_VERSION}/atms-app/ROOT.war"
+
+                        echo "WAR file downloaded successfully"
+                        ls -la ROOT.war
+                    """
+                }
+
+                sh """
+                    set -e
+                    echo "Starting Tomcat..."
+                    [ -x "${TOMCAT_HOME}/bin/catalina.sh" ] || { echo "ERROR: Tomcat not found at ${TOMCAT_HOME} - run QASIP-Instance Provisioning-Mac first"; exit 1; }
+
+                    # macOS: Tomcat 9 needs a JDK; prefer JDK 8 if present
+                    # (same as the Windows deployment), else JDK 17.
+                    if [ -x /usr/libexec/java_home ]; then
+                        export JAVA_HOME=\$(/usr/libexec/java_home -v 1.8 2>/dev/null || /usr/libexec/java_home -v 17 2>/dev/null || /usr/libexec/java_home)
+                    fi
+                    echo "JAVA_HOME=\$JAVA_HOME"
+
+                    "${TOMCAT_HOME}/bin/catalina.sh" start
+
+                    echo "Waiting for Tomcat to initialize..."
+                    for i in \$(seq 1 30); do
+                        if [ -d "${TOMCAT_WEBAPPS}/ROOT/WEB-INF" ]; then
+                            break
+                        fi
+                        sleep 2
+                    done
+
+                    echo "Verifying deployment..."
+                    if [ -d "${TOMCAT_WEBAPPS}/ROOT" ]; then
+                        echo "ROOT directory created successfully"
+                        if [ -f "${TOMCAT_WEBAPPS}/ROOT/WEB-INF/web.xml" ]; then
+                            echo "web.xml found"
+                        else
+                            echo "WARNING: web.xml NOT FOUND"
+                        fi
+                    else
+                        echo "ERROR: ROOT directory not created!"
+                        tail -50 "${TOMCAT_LOGS}/catalina.out" 2>/dev/null || true
+                        exit 1
+                    fi
+
+                    echo
+                    echo "========================================"
+                    echo "Tomcat Deployment Completed"
+                    echo "========================================"
+                    echo "Version: ${params.BUILD_VERSION}"
+                    echo "URL: http://localhost:8080"
+                    echo
+                """
+            }
+        }
+
+        // =============================================
+        // STAGE 6: Deploy UI to Nginx
+        // (Windows: nginx.exe under D:\QASIP\Apps\nginx on :6003.
+        //  Mac: the Homebrew nginx binary with a private prefix at
+        //  ~/QASIP/Apps/nginx, same :6003 and same html root idea.)
+        // =============================================
+        stage('Deploy to Nginx') {
+            steps {
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'nexus-credentials',
+                        usernameVariable: 'NEXUS_USER',
+                        passwordVariable: 'NEXUS_PASSWORD'
+                    )]) {
+                        sh """
+                            set -e
+                            echo "========================================"
+                            echo "Deploying atms-ui to Nginx"
+                            echo "Version: ${params.BUILD_VERSION}"
+                            echo "========================================"
+
+                            NGINX_BIN="\$(command -v nginx || true)"
+                            [ -n "\$NGINX_BIN" ] || { echo "ERROR: nginx not found - run QASIP-Instance Provisioning-Mac first (brew install nginx)"; exit 1; }
+                            echo "Using nginx: \$NGINX_BIN"
+
+                            mkdir -p "${NGINX_HTML_DIR}" "${NGINX_ROOT_DIR}/conf" "${NGINX_ROOT_DIR}/logs" "${NGINX_ROOT_DIR}/temp"
+
+                            # Minimal server config, regenerated only if missing
+                            # (same behaviour as Windows: UI on :6003 from the
+                            # nginx html root, SPA-style fallback to index.html).
+                            if [ ! -f "${NGINX_ROOT_DIR}/conf/nginx.conf" ]; then
+                                cat > "${NGINX_ROOT_DIR}/conf/nginx.conf" <<'NGINXEOF'
+worker_processes  1;
+error_log  logs/error.log;
+pid        logs/nginx.pid;
+events { worker_connections  256; }
+http {
+    access_log  logs/access.log;
+    sendfile    on;
+    include     mime.types;
+    default_type  application/octet-stream;
+    server {
+        listen       6003;
+        server_name  localhost _;
+        root         html;
+        index        index.html;
+        location / {
+            try_files \$uri \$uri/ /index.html;
+        }
+    }
+}
+NGINXEOF
+                                # mime.types ships with the Homebrew nginx;
+                                # reference it by absolute path for this prefix.
+                                NGINX_ETC="\$(brew --prefix nginx 2>/dev/null || echo /opt/homebrew/opt/nginx)"
+                                if [ -f "\$NGINX_ETC/etc/nginx/mime.types" ]; then
+                                    sed -i '' "s|include     mime.types;|include     \$NGINX_ETC/etc/nginx/mime.types;|" "${NGINX_ROOT_DIR}/conf/nginx.conf"
+                                fi
+                                echo "Generated ${NGINX_ROOT_DIR}/conf/nginx.conf"
+                            fi
+
+                            echo "Cleaning Nginx HTML directory..."
+                            rm -rf "${NGINX_HTML_DIR:?}"/*
+                            echo "Directory cleaned"
+
+                            echo "Downloading UI from Nexus..."
+                            TEMP_DIR="\$HOME/QASIP/temp/atms-ui-deploy"
+                            rm -rf "\$TEMP_DIR"
+                            mkdir -p "\$TEMP_DIR"
+
+                            curl -f -u "\$NEXUS_USER:\$NEXUS_PASSWORD" \\
+                              -o "\$TEMP_DIR/atms-ui-dist.tar.gz" \\
+                              "${NEXUS_URL}/repository/${NEXUS_REPO}/${PROJECT_NAME}/macos/${params.BUILD_VERSION}/atms-ui/atms-ui-dist.tar.gz"
+                            echo "Downloaded successfully"
+
+                            echo "Extracting archive..."
+                            tar -xzf "\$TEMP_DIR/atms-ui-dist.tar.gz" -C "\$TEMP_DIR"
+                            rm -f "\$TEMP_DIR/atms-ui-dist.tar.gz"
+                            echo "Archive extracted"
+
+                            echo "Deploying to Nginx..."
+                            cp -R "\$TEMP_DIR"/. "${NGINX_HTML_DIR}/"
+                            rm -rf "\$TEMP_DIR"
+                            echo "Files deployed"
+
+                            echo "Testing Nginx config..."
+                            "\$NGINX_BIN" -p "${NGINX_ROOT_DIR}" -c "${NGINX_ROOT_DIR}/conf/nginx.conf" -t
+
+                            echo "(Re)starting Nginx..."
+                            if [ -f "${NGINX_ROOT_DIR}/logs/nginx.pid" ]; then
+                                "\$NGINX_BIN" -p "${NGINX_ROOT_DIR}" -c "${NGINX_ROOT_DIR}/conf/nginx.conf" -s reload || "\$NGINX_BIN" -p "${NGINX_ROOT_DIR}" -c "${NGINX_ROOT_DIR}/conf/nginx.conf"
+                            else
+                                "\$NGINX_BIN" -p "${NGINX_ROOT_DIR}" -c "${NGINX_ROOT_DIR}/conf/nginx.conf"
+                            fi
+                            sleep 3
+
+                            echo "Verifying Nginx is serving the UI..."
+                            HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" http://localhost:6003/ || true)
+                            echo "GET http://localhost:6003/ -> \$HTTP_CODE"
+                            if [ "\$HTTP_CODE" = "000" ]; then
+                                echo "ERROR: Nginx failed to start / not answering on 6003"
+                                echo "---- nginx error log ----"
+                                tail -30 "${NGINX_ROOT_DIR}/logs/error.log" 2>/dev/null || true
+                                echo "-------------------------"
+                                exit 1
+                            fi
+
+                            echo
+                            echo "========================================"
+                            echo "Nginx Deployment Completed"
+                            echo "========================================"
+                            echo "Location: ${NGINX_HTML_DIR}"
+                            echo "Version: ${params.BUILD_VERSION}"
+                            echo "URL: http://localhost:6003"
+                            echo
+                            echo "Deployed files:"
+                            ls -1 "${NGINX_HTML_DIR}"
+                            echo
+                        """
+                    }
+                }
+            }
+        }
+
+        // =============================================
+        // STAGE 7: Verify the deployment (Safari-ready)
+        // The app is a web UI: once it answers on :6003 it works in
+        // Safari the same way it works in a Windows browser. The curl
+        // checks are authoritative; opening Safari is optional and
+        // only works when the agent runs in a GUI login session.
+        // =============================================
+        stage('Verify Deployment (Safari)') {
+            steps {
+                sh '''
+                    set -e
+                    echo "========================================"
+                    echo "Verifying deployment for Safari"
+                    echo "========================================"
+
+                    echo "Checking UI (Nginx :6003)..."
+                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:6003/)
+                    echo "GET http://localhost:6003/ -> $HTTP_CODE"
+                    case "$HTTP_CODE" in
+                        200|301|302|304) echo "[OK] UI is serving" ;;
+                        *) echo "ERROR: UI not serving correctly on :6003 (HTTP $HTTP_CODE)"; exit 1 ;;
+                    esac
+
+                    echo "Checking backend (Tomcat :8080)..."
+                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || true)
+                    echo "GET http://localhost:8080/ -> $HTTP_CODE"
+                    if [ "$HTTP_CODE" = "000" ]; then
+                        echo "ERROR: Tomcat not answering on :8080"
+                        exit 1
+                    fi
+                    echo "[OK] Backend is answering"
+
+                    echo
+                    echo "Open in Safari on this Mac:  http://localhost:6003"
+                    echo "From another machine:        http://$(hostname):6003  (or this Mac's IP on :6003)"
+                '''
+
+                sh '''
+                    if [ "${OPEN_IN_SAFARI}" = "true" ]; then
+                        echo "Opening http://localhost:6003 in Safari..."
+                        open -a Safari "http://localhost:6003" || echo "WARNING: could not open Safari (agent may not run in a GUI session) - open the URL manually."
+                    else
+                        echo "OPEN_IN_SAFARI=false - skipping Safari launch. Open http://localhost:6003 in Safari manually to verify visually."
+                    fi
+                    exit 0
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    def versionFile = "${env.HOME}/QASIP/version.txt"
+                    def currentVersion = sh(script: "[ -f '${versionFile}' ] && cat '${versionFile}' || echo none", returnStdout: true).trim()
+
+                    sh "mkdir -p '${env.HOME}/QASIP' && echo '${params.BUILD_VERSION}' > '${versionFile}'"
+
+                    echo """
+        ========================================
+                DEPLOYMENT SUCCESSFUL
+        ========================================
+        Previous Version : ${currentVersion}
+        New Version      : ${params.BUILD_VERSION}
+
+        All components deployed successfully:
+
+        - Python AI Application : Running
+        - Node.js Microservice  : Running on port 4001
+        - atms-web (v${params.BUILD_VERSION}) : http://localhost:8080
+        - atms-ui  (v${params.BUILD_VERSION}) : http://localhost:6003  (open in Safari)
+
+        ========================================
+        """
+
+                def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+                sh """
+                node "\$HOME/QASIP/Scripts/sendDeploymentEmail.js" --smtpServer=$SMTP_SERVER --smtpUser=$SMTP_USER --smtpPassword=$SMTP_PASSWORD --smtpPort=$SMTP_PORT --senderName="DevOps QASIP" --senderEmail="copper@qasource.com" --receiverEmail="${params.NOTIFICATION_EMAILS}" --targetMachine="${params.PROJECT_TARGET_MACHINE}" --buildVersion="${params.BUILD_VERSION}" --osType=$ANSIBLE_OS --currentVersion="${currentVersion}" --executionTime="${executionTime}" --status="success" --runUrl="${env.BUILD_URL}"
+                """
+                }
+            }
+        }
+
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+
+                    def versionFile = "${env.HOME}/QASIP/version.txt"
+                    def currentVersion = sh(script: "[ -f '${versionFile}' ] && cat '${versionFile}' || echo none", returnStdout: true).trim()
+
+                    echo """
+        ========================================
+                DEPLOYMENT FAILED
+        ========================================
+        Attempted Version : ${params.BUILD_VERSION}
+        Current Version   : ${currentVersion}
+
+        Deployment did NOT complete.
+        Version file was NOT modified.
+
+        Check logs above for root cause.
+        ========================================
+        """
+                }
+            }
+        }
+    }
+}
