@@ -203,20 +203,58 @@ uname -m
 
 echo "== Xcode Command Line Tools =="
 if ! xcode-select -p >/dev/null 2>&1; then
-    echo "Installing Xcode Command Line Tools (a macOS dialog may appear on first run)..."
-    xcode-select --install || true
-    # Wait for the tools to become available (max ~10 minutes)
-    for i in $(seq 1 60); do xcode-select -p >/dev/null 2>&1 && break; sleep 10; done
-    xcode-select -p
+    echo "Installing Xcode Command Line Tools (headless, via softwareupdate)..."
+    echo "NOTE: this can take 10-30 minutes depending on the network - do not cancel the build."
+    # Headless install: `xcode-select --install` only opens a GUI dialog
+    # that nobody can click in an SSH session, and `xcode-select -p`
+    # errors until the tools exist. The supported unattended path is
+    # softwareupdate with the on-demand marker file:
+    echo "$TARGET_PASSWORD" | sudo -S touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress 2>/dev/null || true
+    CLT_LABEL="$(softwareupdate -l 2>/dev/null | grep -B 1 -E 'Command Line Tools' | awk -F'*' '/^[[:space:]]*\*/ {print $2}' | sed -e 's/^ *//' | tail -1)"
+    if [ -n "$CLT_LABEL" ]; then
+        echo "Installing via softwareupdate: $CLT_LABEL"
+        echo "$TARGET_PASSWORD" | sudo -S softwareupdate -i "$CLT_LABEL" --verbose || true
+    else
+        echo "softwareupdate did not list a CLT package - falling back to xcode-select --install (needs a GUI click on the Mac if a dialog appears)"
+        xcode-select --install || true
+    fi
+    echo "$TARGET_PASSWORD" | sudo -S rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress 2>/dev/null || true
+    # Wait for the tools to become available (max ~30 minutes, progress each minute)
+    for i in $(seq 1 180); do
+        if xcode-select -p >/dev/null 2>&1; then
+            echo "Xcode Command Line Tools ready after ~$((i * 10)) seconds: $(xcode-select -p)"
+            break
+        fi
+        if [ $((i % 6)) -eq 0 ]; then
+            echo "Still waiting for Xcode Command Line Tools... ($((i / 6)) minute(s) elapsed, up to 30)"
+        fi
+        sleep 10
+    done
+    if ! xcode-select -p >/dev/null 2>&1; then
+        echo "ERROR: Xcode Command Line Tools still not available after 30 minutes."
+        echo "On the Mac, run:  xcode-select --install   (and click Install in the dialog), then re-run this pipeline."
+        exit 1
+    fi
 else
     echo "Already installed: $(xcode-select -p)"
 fi
 
 echo "== Homebrew =="
 if ! command -v brew >/dev/null 2>&1; then
-    echo "Installing Homebrew..."
+    echo "Installing Homebrew (can take 5-15 minutes - it downloads and pours bottles)..."
     echo "$TARGET_PASSWORD" | sudo -S -v || true
     NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Wait for brew to become usable (max ~10 minutes, progress each minute)
+    for i in $(seq 1 60); do
+        if [ -x /opt/homebrew/bin/brew ] || [ -x /usr/local/bin/brew ] || command -v brew >/dev/null 2>&1; then
+            echo "Homebrew ready after ~$((i * 10)) seconds."
+            break
+        fi
+        if [ $((i % 6)) -eq 0 ]; then
+            echo "Still waiting for Homebrew... ($((i / 6)) minute(s) elapsed, up to 10)"
+        fi
+        sleep 10
+    done
 fi
 # Apple Silicon: /opt/homebrew, Intel: /usr/local
 if [ -x /opt/homebrew/bin/brew ]; then
