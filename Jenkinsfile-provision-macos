@@ -1,0 +1,459 @@
+/*
+ * Jenkinsfile-provision-macos  (QASIP-Instance Provisioning-Mac)
+ * ============================================================================
+ * macOS counterpart of Jenkinsfile-provision-windows
+ * (QASIP-Instance Provisioning-Windows). Prepares a MacBook so the
+ * QASIP application can be built/deployed onto it and opened in
+ * Safari, the same way a Windows instance is prepared for a browser.
+ *
+ * macOS-specific differences vs the Windows version:
+ *   - The target is a MacBook reached over SSH (port 22, Remote Login)
+ *     instead of WinRM/Ansible-Windows; commands run as `sh` scripts
+ *     over SSH from the Jenkins controller.
+ *   - Software is installed with Homebrew (git, OpenJDK 8 + 17,
+ *     Node, Python 3.11, Gradle, Nginx) plus a Tomcat 9 tarball under
+ *     ~/QASIP/Apps - there is no Chocolatey, no Windows services, and
+ *     no NSSM. GUI/browser side needs nothing special: Safari is
+ *     built into macOS; the app is verified over http://<ip>:6003.
+ *   - Apple Silicon (/opt/homebrew) and Intel (/usr/local) Macs are
+ *     both handled by asking `brew --prefix` at runtime.
+ *   - The Jenkins agent is registered with an SSH-launcher node
+ *     config (Jenkins connects to the Mac itself), so no agent.jar
+ *     service has to be installed on the Mac.
+ *
+ * Requirements on the MacBook before running:
+ *   - "Remote Login" (SSH) enabled: System Settings > General >
+ *     Sharing > Remote Login, for the provisioning user.
+ *   - The provisioning user must be able to run sudo (Homebrew and
+ *     system JDK links need it). The password parameter is used for
+ *     both SSH and sudo -S.
+ *   - A Jenkins SSH credential for the Mac should exist (see the
+ *     Register stage notes); Homebrew's installer also needs Xcode
+ *     Command Line Tools, which the script installs if missing.
+ * ============================================================================
+ */
+pipeline {
+    agent any
+    parameters {
+        string(
+            name: 'PROJECT_NAME',
+            description: 'Unique project identifier (example: copper, andes, gabilan, api). Used for node naming and labeling.'
+        )
+        choice(
+            name: 'PROJECT_TYPE',
+            choices: ['dev', 'poc', 'project'],
+            description: 'Environment type: dev = development, poc = testing, project = QA/Production'
+        )
+        string(
+            name: 'IP_ADDRESS',
+            defaultValue: '',
+            description: 'Target MacBook IP address for provisioning and agent registration'
+        )
+        string(
+            name: 'USERNAME',
+            defaultValue: '',
+            description: 'Remote login username for the MacBook (SSH user)'
+        )
+        password(
+            name: 'PASSWORD',
+            defaultValue: '',
+            description: 'Remote login password for the MacBook (also used for sudo on the Mac)'
+        )
+        string(
+            name: 'NOTIFICATION_EMAILS',
+            defaultValue: '',
+            description: 'Comma-separated email addresses (example: user1@qasource.com, user2@qasource.com)'
+        )
+    }
+    environment {
+        ANSIBLE_OS = "macos"
+    }
+
+    stages {
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    // Normalize values safely (NOTE: never lowercase a
+                    // macOS username blindly if it contains uppercase;
+                    // usernames are kept as entered, only trimmed.)
+                    env.TARGET_IP       = params.IP_ADDRESS?.trim()
+                    env.TARGET_USER     = params.USERNAME?.trim()
+                    env.TARGET_PASSWORD = params.PASSWORD
+                    env.PROJECT_NAME    = params.PROJECT_NAME?.trim()?.toLowerCase()
+                    env.PROJECT_TYPE    = params.PROJECT_TYPE?.trim()?.toLowerCase()
+                    env.NOTIFY_EMAILS   = params.NOTIFICATION_EMAILS?.trim()?.toLowerCase()
+                    // Required validation
+                    def required = [
+                        'TARGET_IP',
+                        'TARGET_USER',
+                        'TARGET_PASSWORD',
+                        'PROJECT_NAME',
+                        'PROJECT_TYPE',
+                        'NOTIFY_EMAILS'
+                    ]
+                    def missing = required.findAll { !env[it] }
+                    if (missing) {
+                        error """
+BUILD FAILED ❌
+Missing required parameters:
+${missing.join('\n')}
+"""
+                    }
+                    // Validate IP format
+                    if (!(env.TARGET_IP ==~ /^(\d{1,3}\.){3}\d{1,3}$/)) {
+                        error "Invalid IP address format → ${env.TARGET_IP}"
+                    }
+                    echo "Parameter validation successful ✅"
+
+                    // Validate Email List
+                    def emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
+
+                    def emailList = env.NOTIFY_EMAILS
+                                        .split(',')
+                                        .collect { it.trim() }
+                                        .findAll { it }
+
+                    // Duplicate check
+                    def duplicates = emailList.groupBy { it }
+                                            .findAll { it.value.size() > 1 }
+                                            .keySet()
+
+                    if (duplicates) {
+                        error "Duplicate email(s) found: ${duplicates.join(', ')}"
+                    }
+
+                    // Format check
+                    def invalidEmails = emailList.findAll { !(it ==~ emailRegex) }
+
+                    if (invalidEmails) {
+                        error """
+        Invalid email format detected:
+        ${invalidEmails.join('\n')}
+
+        Expected format:
+        user1@qasource.com, user2@qasource.com
+        """
+                    }
+
+                    // Save clean list back to env (optional but recommended)
+                    env.NOTIFY_EMAILS = emailList.join(',')
+
+                    echo "Parameter validation successful ✅"
+                }
+            }
+        }
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout SCM') {
+            steps {
+                checkout scm
+            }
+        }
+        stage('Validate Dependencies') {
+            steps {
+                script {
+                    echo "Checking Git installation..."
+                    if (sh(script: 'git --version', returnStatus: true) != 0)
+                        error("Git is not installed on agent")
+                    echo "Checking Python installation..."
+                    if (sh(script: 'python3 --version', returnStatus: true) != 0)
+                        error("Python is not installed on agent")
+                    echo "Checking sshpass installation (needed for password SSH to the Mac)..."
+                    if (sh(script: 'command -v sshpass', returnStatus: true) != 0) {
+                        echo "sshpass not found — installing (controller package manager permitting)"
+                        sh 'sudo apt-get install -y sshpass || brew install esolitos/ipa/sshpass || echo "WARNING: could not install sshpass automatically"'
+                    }
+                    if (sh(script: 'command -v sshpass', returnStatus: true) != 0)
+                        error("sshpass is required on the controller for password-based SSH. Install it (apt-get install sshpass / brew install sshpass) or switch this pipeline to key-based SSH.")
+                    echo "Dependency validation completed successfully"
+                }
+            }
+        }
+
+        // =============================================
+        // Provision the MacBook over SSH:
+        // Xcode CLT -> Homebrew -> toolchain -> QASIP layout
+        // (Tomcat under ~/QASIP/Apps, Nginx prefix prepared).
+        // =============================================
+        stage('Provision MacBook via SSH') {
+            steps {
+                script {
+                    env.MAC_NODE_NAME = "${env.PROJECT_NAME}-${env.PROJECT_TYPE}-${env.TARGET_IP}"
+                    sh '''
+                        set -e
+                        export SSHPASS="$TARGET_PASSWORD"
+                        SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+                        SSH_CMD="sshpass -e ssh $SSH_OPTS ${TARGET_USER}@${TARGET_IP}"
+                        SCP_CMD="sshpass -e scp $SSH_OPTS"
+
+                        echo "========================================"
+                        echo "Provisioning MacBook ${TARGET_USER}@${TARGET_IP}"
+                        echo "========================================"
+
+                        # Remote provisioning script (runs on the Mac).
+                        cat > /tmp/qasip_provision_mac.sh <<'REMOTE_EOF'
+set -e
+echo "== macOS info =="
+sw_vers
+uname -m
+
+echo "== Xcode Command Line Tools =="
+if ! xcode-select -p >/dev/null 2>&1; then
+    echo "Installing Xcode Command Line Tools (a macOS dialog may appear on first run)..."
+    xcode-select --install || true
+    # Wait for the tools to become available (max ~10 minutes)
+    for i in $(seq 1 60); do xcode-select -p >/dev/null 2>&1 && break; sleep 10; done
+    xcode-select -p
+else
+    echo "Already installed: $(xcode-select -p)"
+fi
+
+echo "== Homebrew =="
+if ! command -v brew >/dev/null 2>&1; then
+    echo "Installing Homebrew..."
+    echo "$TARGET_PASSWORD" | sudo -S -v || true
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+# Apple Silicon: /opt/homebrew, Intel: /usr/local
+if [ -x /opt/homebrew/bin/brew ]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [ -x /usr/local/bin/brew ]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+fi
+brew --version
+
+echo "== Toolchain (Homebrew) =="
+# git/curl ship with macOS; install the QASIP build/run toolchain.
+brew install git node python@3.11 gradle nginx || brew upgrade git node python@3.11 gradle nginx || true
+
+echo "== Java (JDK 17 for Jenkins/Tomcat tooling, JDK 8 for the legacy app if available) =="
+brew install openjdk@17 || brew upgrade openjdk@17 || true
+brew install openjdk@8 || echo "NOTE: openjdk@8 not available from Homebrew core on this Mac - install a JDK 8 (e.g. Azul Zulu 8) manually if the Java app will not run on 17."
+# Make JDK 17 discoverable by /usr/libexec/java_home
+echo "$TARGET_PASSWORD" | sudo -S ln -sfn "$(brew --prefix openjdk@17)/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-17.jdk 2>/dev/null || echo "WARNING: could not link JDK 17 into /Library/Java (continuing - java_home may not list it)"
+/usr/libexec/java_home -V 2>&1 || true
+java -version 2>&1 || true
+node --version
+python3 --version
+gradle --version | head -5 || true
+nginx -v 2>&1 || true
+
+echo "== QASIP directory layout (mirrors D:\\QASIP on Windows) =="
+mkdir -p "$HOME/QASIP/Apps/tomcat" "$HOME/QASIP/Apps/nginx/html" "$HOME/QASIP/Apps/nginx/conf" "$HOME/QASIP/Apps/nginx/logs" \
+         "$HOME/QASIP/Apps/python-ai-service" "$HOME/QASIP/Apps/node-service" \
+         "$HOME/QASIP/Scripts" "$HOME/QASIP/run" "$HOME/QASIP/logs" "$HOME/deploys" "$HOME/jenkins"
+
+echo "== Tomcat 9 (tarball into ~/QASIP/Apps/tomcat) =="
+TOMCAT_VERSION="9.0.98"
+if [ ! -x "$HOME/QASIP/Apps/tomcat/bin/catalina.sh" ]; then
+    TOMCAT_MAJOR="${TOMCAT_VERSION%%.*}"
+    TOMCAT_URL="https://archive.apache.org/dist/tomcat/tomcat-${TOMCAT_MAJOR}/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz"
+    echo "Downloading $TOMCAT_URL"
+    curl -fsSL "$TOMCAT_URL" -o /tmp/apache-tomcat.tar.gz
+    tar -xzf /tmp/apache-tomcat.tar.gz -C /tmp
+    cp -R "/tmp/apache-tomcat-${TOMCAT_VERSION}/." "$HOME/QASIP/Apps/tomcat/"
+    chmod +x "$HOME/QASIP/Apps/tomcat/bin/"*.sh
+    rm -f /tmp/apache-tomcat.tar.gz
+fi
+"$HOME/QASIP/Apps/tomcat/bin/catalina.sh" version 2>/dev/null | head -3 || true
+
+echo "== Ports sanity (must be free or already ours: 6003 UI, 8080 Tomcat, 4001 Node) =="
+for port in 6003 8080 4001; do
+    if lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "Port $port: in use by:"
+        lsof -iTCP:"$port" -sTCP:LISTEN | head -3
+    else
+        echo "Port $port: free"
+    fi
+done
+
+echo "== Safari =="
+if [ -d "/Applications/Safari.app" ]; then
+    echo "Safari present (built into macOS) - the deployed app will open at http://${TARGET_IP}:6003 after QASIP-Deploy-Mac runs."
+else
+    echo "WARNING: Safari.app not found (unexpected on macOS)."
+fi
+
+echo "PROVISIONING_DONE"
+REMOTE_EOF
+
+                        echo "Copying provisioning script to the Mac..."
+                        $SCP_CMD /tmp/qasip_provision_mac.sh "${TARGET_USER}@${TARGET_IP}:/tmp/qasip_provision_mac.sh"
+
+                        echo "Running provisioning script on the Mac (this can take several minutes)..."
+                        $SSH_CMD "TARGET_PASSWORD='$TARGET_PASSWORD' bash /tmp/qasip_provision_mac.sh"
+
+                        echo "MacBook provisioning completed."
+                    '''
+                }
+            }
+        }
+
+        // =============================================
+        // Register the Mac as a Jenkins agent (SSH launcher).
+        // Jenkins itself connects to the Mac over SSH, so - unlike
+        // the Windows agent - nothing has to run permanently on the
+        // Mac besides Remote Login. Requires an SSH username/password
+        // (or key) credential in Jenkins whose ID matches the node
+        // name; the stage tells you if it has to be created first.
+        // =============================================
+        stage('Register Jenkins Agent') {
+            steps {
+                script {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'jenkins-api-creds',
+                            usernameVariable: 'JENKINS_USER',
+                            passwordVariable: 'JENKINS_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
+                            NODE_NAME="${PROJECT_NAME}-${PROJECT_TYPE}-${TARGET_IP}"
+                            LABELS="${PROJECT_NAME}-${PROJECT_TYPE}-${TARGET_IP} ${PROJECT_NAME}-${PROJECT_TYPE} macos ${PROJECT_NAME}-mac"
+
+                            echo "Registering Jenkins node: $NODE_NAME (labels: $LABELS)"
+
+                            # Does an SSH credential with the node name as ID exist?
+                            CRED_ID="$NODE_NAME"
+                            CRED_CHECK=$(curl -s -o /dev/null -w "%{http_code}" -u "$JENKINS_USER:$JENKINS_TOKEN" \
+                              "$JENKINS_URL/credentials/store/system/domain/_/credential/$CRED_ID/api/json" || true)
+                            if [ "$CRED_CHECK" != "200" ]; then
+                                echo "WARNING: No Jenkins credential with ID '$CRED_ID' found."
+                                echo "Create it once in Jenkins (Manage Jenkins > Credentials):"
+                                echo "  Kind: Username with password (or SSH Username with private key)"
+                                echo "  ID:   $CRED_ID"
+                                echo "  User: ${TARGET_USER}  (the Mac login user)"
+                                echo "Then re-run this pipeline (or just this stage via Restart from Stage)."
+                            fi
+
+                            # Jenkins crumb for CSRF protection
+                            CRUMB=$(curl -s -u "$JENKINS_USER:$JENKINS_TOKEN" "$JENKINS_URL/crumbIssuer/api/json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('crumbRequestField','')+':'+d.get('crumb',''))" 2>/dev/null || echo "")
+
+                            cat > /tmp/mac_node.xml <<EOF
+<?xml version='1.1' encoding='UTF-8'?>
+<slave>
+  <name>$NODE_NAME</name>
+  <description>QASIP MacBook agent (${PROJECT_NAME}-${PROJECT_TYPE}) - macOS, Safari target</description>
+  <remoteFS>/Users/${TARGET_USER}/jenkins</remoteFS>
+  <numExecutors>2</numExecutors>
+  <mode>EXCLUSIVE</mode>
+  <retentionStrategy class="hudson.slaves.RetentionStrategy\$Always"/>
+  <launcher class="hudson.plugins.sshslaves.SSHLauncher" plugin="ssh-slaves">
+    <host>${TARGET_IP}</host>
+    <port>22</port>
+    <credentialsId>$CRED_ID</credentialsId>
+    <launchTimeoutSeconds>60</launchTimeoutSeconds>
+    <maxNumRetries>3</maxNumRetries>
+    <retryWaitTime>15</retryWaitTime>
+    <sshHostKeyVerificationStrategy class="hudson.plugins.sshslaves.verifiers.NonVerifyingKeyVerificationStrategy"/>
+    <tcpNoDelay>true</tcpNoDelay>
+  </launcher>
+  <label>$LABELS</label>
+  <nodeProperties/>
+</slave>
+EOF
+
+                            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "$JENKINS_USER:$JENKINS_TOKEN" \
+                              -H "$CRUMB" -H "Content-Type: application/xml" \
+                              --data-binary @/tmp/mac_node.xml \
+                              "$JENKINS_URL/computer/doCreateItem?name=$NODE_NAME&type=hudson.slaves.DumbSlave")
+                            echo "Create node HTTP: $HTTP_CODE"
+                            if [ "$HTTP_CODE" = "200" ]; then
+                                echo "Node $NODE_NAME created."
+                            else
+                                echo "Node may already exist (HTTP $HTTP_CODE) - updating its config instead..."
+                                curl -s -o /dev/null -w "Config update HTTP: %{http_code}\n" -u "$JENKINS_USER:$JENKINS_TOKEN" \
+                                  -H "$CRUMB" -H "Content-Type: application/xml" \
+                                  --data-binary @/tmp/mac_node.xml \
+                                  "$JENKINS_URL/computer/$NODE_NAME/config.xml" || true
+                            fi
+
+                            echo "Bringing node online (Jenkins connects over SSH)..."
+                            curl -s -o /dev/null -w "Toggle offline HTTP: %{http_code}\n" -u "$JENKINS_USER:$JENKINS_TOKEN" \
+                              -H "$CRUMB" -X POST \
+                              "$JENKINS_URL/computer/$NODE_NAME/toggleOffline?offlineMessage=provisioned" || true
+
+                            echo "Agent registration step done. Verify in Jenkins: Manage Jenkins > Nodes > $NODE_NAME"
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Install Node Dependencies') {
+            steps {
+                sh 'cd scripts && npm install'
+            }
+        }
+    }
+
+    post {
+        success {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+
+                    def node_name = "${params.PROJECT_NAME}-${params.PROJECT_TYPE}-${params.IP_ADDRESS}"
+                    def executionTime = currentBuild.durationString.replace(' and counting', '')
+
+                    echo """
+    ========================================
+    PIPELINE PASSED
+    ========================================
+    Project Name  : ${params.PROJECT_NAME}
+    Project Type  : ${params.PROJECT_TYPE}
+    IP Address    : ${params.IP_ADDRESS}
+    Agent Name    : ${node_name}
+    Execution Time: ${executionTime}
+    Build URL     : ${env.BUILD_URL}
+    ========================================
+    """
+
+                    sh """
+                    node scripts/sendProvisioningEmail.js \\
+                    --smtpServer=$SMTP_SERVER \\
+                    --smtpUser=$SMTP_USER \\
+                    --smtpPassword=$SMTP_PASSWORD \\
+                    --smtpPort=$SMTP_PORT \\
+                    --senderName="DevOps QASIP" \\
+                    --senderEmail="copper@qasource.com" \\
+                    --receiverEmail="${params.NOTIFICATION_EMAILS}" \\
+                    --projectName="${params.PROJECT_NAME}" \\
+                    --projectType="${params.PROJECT_TYPE}" \\
+                    --ipAddress="${params.IP_ADDRESS}" \\
+                    --osType="${env.ANSIBLE_OS}" \\
+                    --agentName="${node_name}" \\
+                    --executionTime="${executionTime}" \\
+                    --status="success"
+                    """
+                }
+            }
+        }
+        failure {
+            withCredentials([
+                string(credentialsId: 'SMTP_SERVER', variable: 'SMTP_SERVER'),
+                string(credentialsId: 'SMTP_PORT', variable: 'SMTP_PORT'),
+                string(credentialsId: 'SMTP_USER', variable: 'SMTP_USER'),
+                string(credentialsId: 'SMTP_PASSWORD', variable: 'SMTP_PASSWORD')
+            ]) {
+                script {
+                    echo """
+    =======================================
+    ❌ PIPELINE FAILED
+    =======================================
+    =======================================
+    """
+                }
+            }
+        }
+    }
+}
