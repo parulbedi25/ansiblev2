@@ -10,13 +10,16 @@
  *   - The target is a MacBook reached over SSH (port 22, Remote Login)
  *     instead of WinRM/Ansible-Windows; commands run as `sh` scripts
  *     over SSH from the Jenkins controller.
- *   - Software is installed with Homebrew (git, OpenJDK 8 + 17,
- *     Node, Python 3.11, Gradle, Nginx) plus a Tomcat 9 tarball under
- *     ~/QASIP/Apps - there is no Chocolatey, no Windows services, and
- *     no NSSM. GUI/browser side needs nothing special: Safari is
- *     built into macOS; the app is verified over http://<ip>:6003.
- *   - Apple Silicon (/opt/homebrew) and Intel (/usr/local) Macs are
- *     both handled by asking `brew --prefix` at runtime.
+ *   - Software: on Apple Silicon, Homebrew (git, OpenJDK 8 + 17,
+ *     Node, Python 3.11, Gradle, Nginx); on Intel, the official
+ *     vendor packages instead (Homebrew dropped Intel in 2026) -
+ *     nodejs.org Node, python.org Python 3.11, Eclipse Temurin
+ *     JDK 17 + 8, gradle.org Gradle, nginx.org source build, git
+ *     from the Xcode Command Line Tools. Plus a Tomcat 9 tarball
+ *     under ~/QASIP/Apps - there is no Chocolatey, no Windows
+ *     services, and no NSSM. GUI/browser side needs nothing
+ *     special: Safari is built into macOS; the app is verified
+ *     over http://<ip>:6003.
  *   - The Jenkins agent is registered with an SSH-launcher node
  *     config (Jenkins connects to the Mac itself), so no agent.jar
  *     service has to be installed on the Mac.
@@ -202,7 +205,35 @@ sw_vers
 uname -m
 
 echo "== Xcode Command Line Tools =="
-if ! xcode-select -p >/dev/null 2>&1; then
+# NOTE: `xcode-select -p` alone is not proof the tools work - a stale or
+# half-upgraded CLT directory makes it succeed while clang/make are
+# missing (Homebrew then fails with "No developer tools installed").
+# Verify the compiler and make actually run:
+clt_ok() {
+    xcode-select -p >/dev/null 2>&1 && clang --version >/dev/null 2>&1 && xcrun --find make >/dev/null 2>&1
+}
+# Skip the install entirely when Xcode / the Command Line Tools are
+# already installed AND working - only install when they are missing
+# or broken:
+SKIP_CLT=0
+if clt_ok; then
+    SKIP_CLT=1
+fi
+if [ "$SKIP_CLT" = "0" ] && [ -d "/Applications/Xcode.app" ]; then
+    # Full Xcode is installed but not selected (or the CLT next to it is
+    # stale) - point xcode-select at Xcode itself and check again.
+    echo "Full Xcode found at /Applications/Xcode.app - selecting it as the developer directory..."
+    echo "$TARGET_PASSWORD" | sudo -S xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+    if clt_ok; then
+        SKIP_CLT=1
+    fi
+fi
+if [ "$SKIP_CLT" = "0" ]; then
+    if xcode-select -p >/dev/null 2>&1; then
+        echo "Command Line Tools directory exists but the tools do not run - removing the stale install and reinstalling..."
+        echo "$TARGET_PASSWORD" | sudo -S rm -rf /Library/Developer/CommandLineTools 2>/dev/null || true
+        echo "$TARGET_PASSWORD" | sudo -S xcode-select --reset 2>/dev/null || true
+    fi
     echo "Installing Xcode Command Line Tools (headless, via softwareupdate)..."
     echo "NOTE: this can take 10-30 minutes depending on the network - do not cancel the build."
     # Headless install: `xcode-select --install` only opens a GUI dialog
@@ -221,7 +252,7 @@ if ! xcode-select -p >/dev/null 2>&1; then
     echo "$TARGET_PASSWORD" | sudo -S rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress 2>/dev/null || true
     # Wait for the tools to become available (max ~30 minutes, progress each minute)
     for i in $(seq 1 180); do
-        if xcode-select -p >/dev/null 2>&1; then
+        if clt_ok; then
             echo "Xcode Command Line Tools ready after ~$((i * 10)) seconds: $(xcode-select -p)"
             break
         fi
@@ -230,75 +261,153 @@ if ! xcode-select -p >/dev/null 2>&1; then
         fi
         sleep 10
     done
-    if ! xcode-select -p >/dev/null 2>&1; then
-        echo "ERROR: Xcode Command Line Tools still not available after 30 minutes."
+    if ! clt_ok; then
+        echo "ERROR: Xcode Command Line Tools still not working after 30 minutes."
         echo "On the Mac, run:  xcode-select --install   (and click Install in the dialog), then re-run this pipeline."
         exit 1
     fi
 else
-    echo "Already installed: $(xcode-select -p)"
+    if [ -d "/Applications/Xcode.app" ]; then
+        echo "Xcode already installed (/Applications/Xcode.app) - skipping Command Line Tools install."
+    else
+        echo "Xcode Command Line Tools already installed and working: $(xcode-select -p) - skipping install."
+    fi
+    clang --version | head -1
 fi
 
-echo "== Homebrew =="
-# Intel note (Oct 2026): Homebrew 7's installer aborts on Intel with
-# "Homebrew on macOS is only supported on Apple Silicon processors!".
-# Homebrew 6.0.22 is the last release that still runs on Intel (Tier 3),
-# so on x86_64 we install that pinned tarball into /usr/local manually
-# and disable auto-update so brew does not upgrade itself to 7.
-# Apple Silicon Macs use the normal installer.
 if [ "$(uname -m)" = "x86_64" ]; then
-    export HOMEBREW_NO_AUTO_UPDATE=1
-fi
-if ! command -v brew >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/brew ] && [ ! -x /usr/local/bin/brew ]; then
-    if [ "$(uname -m)" = "x86_64" ]; then
-        BREW_VERSION="6.0.22"
-        echo "Intel Mac detected - installing Homebrew $BREW_VERSION (last Intel-compatible release) into /usr/local..."
-        echo "$TARGET_PASSWORD" | sudo -S mkdir -p /usr/local/Homebrew /usr/local/Cellar /usr/local/Frameworks /usr/local/bin /usr/local/etc /usr/local/include /usr/local/lib /usr/local/opt /usr/local/sbin /usr/local/share /usr/local/var 2>/dev/null || true
-        echo "$TARGET_PASSWORD" | sudo -S chown -R "$(whoami)":admin /usr/local/Homebrew /usr/local/Cellar /usr/local/Frameworks /usr/local/bin /usr/local/etc /usr/local/include /usr/local/lib /usr/local/opt /usr/local/sbin /usr/local/share /usr/local/var 2>/dev/null || true
-        curl -fsSL "https://github.com/Homebrew/brew/archive/refs/tags/${BREW_VERSION}.tar.gz" -o /tmp/homebrew.tar.gz
-        tar -xzf /tmp/homebrew.tar.gz --strip 1 -C /usr/local/Homebrew
-        rm -f /tmp/homebrew.tar.gz
-        ln -sfn ../Homebrew/bin/brew /usr/local/bin/brew
-    else
+    # =============================================
+    # Intel Mac: official vendor packages only.
+    # Homebrew no longer supports Intel (its installer aborts and it
+    # ships no Intel bottles, so installs fall back to source builds
+    # that fail without a full toolchain). git/clang/make come from
+    # the Xcode Command Line Tools above; everything else comes from
+    # the vendor's own distribution:
+    #   Node.js  - nodejs.org official macOS x64 tarball
+    #   Python   - python.org official macOS installer (.pkg)
+    #   Java     - Eclipse Temurin (Adoptium) 17 + 8 tarballs
+    #   Gradle   - gradle.org official distribution zip
+    #   Nginx    - nginx.org official source tarball (compiled with
+    #              the CLT compiler; no official macOS binary exists)
+    # =============================================
+    echo "== Toolchain (Intel - official vendor packages, no Homebrew) =="
+    export PATH="/usr/local/bin:$PATH"
+    echo "$TARGET_PASSWORD" | sudo -S mkdir -p /usr/local/bin /usr/local/opt /Library/Java/JavaVirtualMachines 2>/dev/null || true
+
+    if ! command -v node >/dev/null 2>&1; then
+        NODE_VERSION="22.14.0"
+        echo "Installing Node.js $NODE_VERSION (nodejs.org)..."
+        curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-x64.tar.gz" -o /tmp/node.tar.gz
+        rm -rf "/tmp/node-v${NODE_VERSION}-darwin-x64"
+        tar -xzf /tmp/node.tar.gz -C /tmp
+        echo "$TARGET_PASSWORD" | sudo -S cp -R "/tmp/node-v${NODE_VERSION}-darwin-x64/." /usr/local/
+        rm -rf "/tmp/node-v${NODE_VERSION}-darwin-x64" /tmp/node.tar.gz
+    fi
+
+    if ! /usr/local/bin/python3.11 --version >/dev/null 2>&1 && ! /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 --version >/dev/null 2>&1; then
+        echo "Installing Python 3.11.9 (python.org)..."
+        curl -fsSL "https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg" -o /tmp/python311.pkg
+        echo "$TARGET_PASSWORD" | sudo -S installer -pkg /tmp/python311.pkg -target /
+        rm -f /tmp/python311.pkg
+    fi
+
+    if [ ! -x /Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home/bin/java ]; then
+        echo "Installing Eclipse Temurin JDK 17 (Adoptium)..."
+        curl -fsSL "https://api.adoptium.net/v3/binary/latest/17/ga/mac/x64/jdk/hotspot/normal/eclipse" -o /tmp/temurin17.tar.gz
+        rm -rf /tmp/temurin17 && mkdir -p /tmp/temurin17
+        tar -xzf /tmp/temurin17.tar.gz -C /tmp/temurin17
+        echo "$TARGET_PASSWORD" | sudo -S rm -rf /Library/Java/JavaVirtualMachines/temurin-17.jdk
+        echo "$TARGET_PASSWORD" | sudo -S cp -R /tmp/temurin17/jdk-17*/Contents /Library/Java/JavaVirtualMachines/temurin-17.jdk
+        rm -rf /tmp/temurin17 /tmp/temurin17.tar.gz
+    fi
+
+    if [ ! -x /Library/Java/JavaVirtualMachines/temurin-8.jdk/Contents/Home/bin/java ]; then
+        echo "Installing Eclipse Temurin JDK 8 (Adoptium)..."
+        curl -fsSL "https://api.adoptium.net/v3/binary/latest/8/ga/mac/x64/jdk/hotspot/normal/eclipse" -o /tmp/temurin8.tar.gz
+        rm -rf /tmp/temurin8 && mkdir -p /tmp/temurin8
+        tar -xzf /tmp/temurin8.tar.gz -C /tmp/temurin8
+        echo "$TARGET_PASSWORD" | sudo -S rm -rf /Library/Java/JavaVirtualMachines/temurin-8.jdk
+        echo "$TARGET_PASSWORD" | sudo -S cp -R /tmp/temurin8/jdk8u*/Contents /Library/Java/JavaVirtualMachines/temurin-8.jdk
+        rm -rf /tmp/temurin8 /tmp/temurin8.tar.gz
+    fi
+
+    if ! command -v gradle >/dev/null 2>&1; then
+        GRADLE_VERSION="8.10.2"
+        echo "Installing Gradle $GRADLE_VERSION (gradle.org)..."
+        curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+        rm -rf "/tmp/gradle-${GRADLE_VERSION}"
+        unzip -q -o /tmp/gradle.zip -d /tmp
+        echo "$TARGET_PASSWORD" | sudo -S rm -rf "/usr/local/opt/gradle-${GRADLE_VERSION}"
+        echo "$TARGET_PASSWORD" | sudo -S cp -R "/tmp/gradle-${GRADLE_VERSION}" /usr/local/opt/
+        echo "$TARGET_PASSWORD" | sudo -S ln -sfn "/usr/local/opt/gradle-${GRADLE_VERSION}" /usr/local/opt/gradle
+        echo "$TARGET_PASSWORD" | sudo -S ln -sfn /usr/local/opt/gradle/bin/gradle /usr/local/bin/gradle
+        rm -rf "/tmp/gradle-${GRADLE_VERSION}" /tmp/gradle.zip
+    fi
+
+    if ! command -v nginx >/dev/null 2>&1; then
+        NGINX_VERSION="1.26.2"
+        echo "Installing nginx $NGINX_VERSION (nginx.org source build)..."
+        curl -fsSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" -o /tmp/nginx.tar.gz
+        rm -rf "/tmp/nginx-${NGINX_VERSION}"
+        tar -xzf /tmp/nginx.tar.gz -C /tmp
+        cd "/tmp/nginx-${NGINX_VERSION}"
+        ./configure --prefix=/usr/local/opt/nginx --without-http_rewrite_module
+        make -j4
+        echo "$TARGET_PASSWORD" | sudo -S make install
+        echo "$TARGET_PASSWORD" | sudo -S ln -sfn /usr/local/opt/nginx/sbin/nginx /usr/local/bin/nginx
+        cd /
+        rm -rf "/tmp/nginx-${NGINX_VERSION}" /tmp/nginx.tar.gz
+    fi
+    # mime.types for the private QASIP nginx prefix used by Deploy
+    mkdir -p "$HOME/QASIP/Apps/nginx/conf"
+    cp /usr/local/opt/nginx/conf/mime.types "$HOME/QASIP/Apps/nginx/conf/mime.types" || true
+
+    /usr/libexec/java_home -V 2>&1 || true
+    /Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home/bin/java -version 2>&1 || true
+    /Library/Java/JavaVirtualMachines/temurin-8.jdk/Contents/Home/bin/java -version 2>&1 || true
+    node --version
+    /usr/local/bin/python3.11 --version || /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 --version
+    gradle --version | head -5 || true
+    nginx -v 2>&1 || true
+else
+    echo "== Homebrew (Apple Silicon) =="
+    if ! command -v brew >/dev/null 2>&1 && [ ! -x /opt/homebrew/bin/brew ]; then
         echo "Installing Homebrew (can take 5-15 minutes - it downloads and pours bottles)..."
         echo "$TARGET_PASSWORD" | sudo -S -v || true
         NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # Wait for brew to become usable (max ~10 minutes, progress each minute)
+        for i in $(seq 1 60); do
+            if [ -x /opt/homebrew/bin/brew ] || command -v brew >/dev/null 2>&1; then
+                echo "Homebrew ready after ~$((i * 10)) seconds."
+                break
+            fi
+            if [ $((i % 6)) -eq 0 ]; then
+                echo "Still waiting for Homebrew... ($((i / 6)) minute(s) elapsed, up to 10)"
+            fi
+            sleep 10
+        done
     fi
-    # Wait for brew to become usable (max ~10 minutes, progress each minute)
-    for i in $(seq 1 60); do
-        if [ -x /opt/homebrew/bin/brew ] || [ -x /usr/local/bin/brew ] || command -v brew >/dev/null 2>&1; then
-            echo "Homebrew ready after ~$((i * 10)) seconds."
-            break
-        fi
-        if [ $((i % 6)) -eq 0 ]; then
-            echo "Still waiting for Homebrew... ($((i / 6)) minute(s) elapsed, up to 10)"
-        fi
-        sleep 10
-    done
-fi
-# Apple Silicon: /opt/homebrew, Intel: /usr/local
-if [ -x /opt/homebrew/bin/brew ]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-elif [ -x /usr/local/bin/brew ]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-fi
-brew --version
+    if [ -x /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    fi
+    brew --version
 
-echo "== Toolchain (Homebrew) =="
-# git/curl ship with macOS; install the QASIP build/run toolchain.
-brew install git node python@3.11 gradle nginx || brew upgrade git node python@3.11 gradle nginx || true
+    echo "== Toolchain (Homebrew) =="
+    # git/curl ship with macOS; install the QASIP build/run toolchain.
+    brew install git node python@3.11 gradle nginx || brew upgrade git node python@3.11 gradle nginx || true
 
-echo "== Java (JDK 17 for Jenkins/Tomcat tooling, JDK 8 for the legacy app if available) =="
-brew install openjdk@17 || brew upgrade openjdk@17 || true
-brew install openjdk@8 || echo "NOTE: openjdk@8 not available from Homebrew core on this Mac - install a JDK 8 (e.g. Azul Zulu 8) manually if the Java app will not run on 17."
-# Make JDK 17 discoverable by /usr/libexec/java_home
-echo "$TARGET_PASSWORD" | sudo -S ln -sfn "$(brew --prefix openjdk@17)/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-17.jdk 2>/dev/null || echo "WARNING: could not link JDK 17 into /Library/Java (continuing - java_home may not list it)"
-/usr/libexec/java_home -V 2>&1 || true
-java -version 2>&1 || true
-node --version
-python3 --version
-gradle --version | head -5 || true
-nginx -v 2>&1 || true
+    echo "== Java (JDK 17 for Jenkins/Tomcat tooling, JDK 8 for the legacy app if available) =="
+    brew install openjdk@17 || brew upgrade openjdk@17 || true
+    brew install openjdk@8 || echo "NOTE: openjdk@8 not available from Homebrew core on this Mac - install a JDK 8 (e.g. Azul Zulu 8) manually if the Java app will not run on 17."
+    # Make JDK 17 discoverable by /usr/libexec/java_home
+    echo "$TARGET_PASSWORD" | sudo -S ln -sfn "$(brew --prefix openjdk@17)/libexec/openjdk.jdk" /Library/Java/JavaVirtualMachines/openjdk-17.jdk 2>/dev/null || echo "WARNING: could not link JDK 17 into /Library/Java (continuing - java_home may not list it)"
+    /usr/libexec/java_home -V 2>&1 || true
+    java -version 2>&1 || true
+    node --version
+    python3 --version
+    gradle --version | head -5 || true
+    nginx -v 2>&1 || true
+fi
 
 echo "== QASIP directory layout (mirrors D:\\QASIP on Windows) =="
 mkdir -p "$HOME/QASIP/Apps/tomcat" "$HOME/QASIP/Apps/nginx/html" "$HOME/QASIP/Apps/nginx/conf" "$HOME/QASIP/Apps/nginx/logs" \

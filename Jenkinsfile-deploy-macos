@@ -593,11 +593,25 @@ http {
     }
 }
 NGINXEOF
-                                # mime.types ships with the Homebrew nginx;
+                                # mime.types ships with the installed nginx
+                                # (Homebrew on Apple Silicon, /usr/local/opt/nginx
+                                # from the official source build on Intel);
                                 # reference it by absolute path for this prefix.
-                                NGINX_ETC="\$(brew --prefix nginx 2>/dev/null || echo /opt/homebrew/opt/nginx)"
-                                if [ -f "\$NGINX_ETC/etc/nginx/mime.types" ]; then
-                                    sed -i '' "s|include     mime.types;|include     \$NGINX_ETC/etc/nginx/mime.types;|" "${NGINX_ROOT_DIR}/conf/nginx.conf"
+                                # Provision also copies it into this prefix's
+                                # conf/ dir, in which case the relative include
+                                # already works and no rewrite is needed.
+                                MIME_TYPES=""
+                                NGINX_ETC="\$(brew --prefix nginx 2>/dev/null || true)"
+                                for cand in "\$NGINX_ETC" /opt/homebrew/opt/nginx /usr/local/opt/nginx; do
+                                    if [ -n "\$cand" ] && [ -f "\$cand/etc/nginx/mime.types" ]; then
+                                        MIME_TYPES="\$cand/etc/nginx/mime.types"
+                                    fi
+                                    if [ -n "\$cand" ] && [ -f "\$cand/conf/mime.types" ]; then
+                                        MIME_TYPES="\$cand/conf/mime.types"
+                                    fi
+                                done
+                                if [ -n "\$MIME_TYPES" ]; then
+                                    sed -i '' "s|include     mime.types;|include     \$MIME_TYPES;|" "${NGINX_ROOT_DIR}/conf/nginx.conf"
                                 fi
                                 echo "Generated ${NGINX_ROOT_DIR}/conf/nginx.conf"
                             fi
