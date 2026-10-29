@@ -37,16 +37,22 @@ nginx_listen_port: "6003"
 #     windows (npm run build -> dist) and the built files are PUBLISHED
 #     (copied) into the Nginx root below. Nginx never serves files
 #     directly from the frontend source directory either.
-#   - Admin UI is served by Nginx on knowledge_hub_listen_port (8000),
-#     root = knowledge_hub_root under the Nginx install
-#     (D:\QASIP\Apps\nginx\html\knowledge-hub) - the published copy.
-#   - /health and /mcp/ on the UI port (8000) are reverse-proxied to
-#     the backend at knowledge_hub_backend_host:knowledge_hub_backend_port
-#     (127.0.0.1:8037) so browser calls can stay same-origin (SSE at
-#     /mcp/stream needs proxy_buffering off).
+#   - Admin UI is served by Nginx on knowledge_hub_listen_port (80,
+#     server_name copper.qajarvis.com), root = knowledge_hub_root under
+#     the Nginx install (D:\QASIP\Apps\nginx\html\knowledge-hub) - the
+#     published copy.
+#   - /health, /admin/, /mcp and /mcp/ on the UI port (80) are
+#     reverse-proxied to the backend at
+#     knowledge_hub_backend_host:knowledge_hub_backend_port
+#     (127.0.0.1:8037) so browser calls can stay same-origin (MCP/SSE
+#     needs proxy_buffering off).
+#   - A dedicated MCP reverse proxy listens on
+#     knowledge_hub_mcp_listen_port (8040): http://<instance>:8040/mcp
+#     -> http://127.0.0.1:8037.
 knowledge_hub_enabled: true
-knowledge_hub_listen_port: "8000"
-knowledge_hub_server_name: "_"   # answer for localhost and <instance>.qajarvis.com alike
+knowledge_hub_listen_port: "80"
+knowledge_hub_mcp_listen_port: "8040"
+knowledge_hub_server_name: "copper.qajarvis.com"   # Admin UI virtual host on :80
 knowledge_hub_root: "html/knowledge-hub"
 knowledge_hub_ui_root_path: "{{ nginx_root_path }}\\{{ knowledge_hub_root }}"
 knowledge_hub_backend_host: "127.0.0.1"

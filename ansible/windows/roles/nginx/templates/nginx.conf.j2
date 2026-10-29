@@ -188,27 +188,28 @@ http {
     #             directory; Jenkins builds it (npm run build) and
     #             PUBLISHES dist into the Nginx root below, so Nginx
     #             serves the published copy, not the source directory:
-    #   Admin UI : http://localhost:8000/
-    #              http://<instance>.qajarvis.com:8000/
-    #              /mcp and /health on this port are proxied to the
-    #              backend so browser calls from the UI can stay
-    #              same-origin (SSE needs proxy_buffering off).
+    #   Admin UI : http://copper.qajarvis.com/ (port 80)
+    #              /admin/, /health, /mcp and /mcp/ on this port are
+    #              proxied to the backend so browser calls from the UI
+    #              can stay same-origin (MCP/SSE needs buffering off).
+    #   MCP proxy: http://<instance>:8040/mcp -> backend :8037 (below).
     # NOTE: this block is deliberately NOT conditional and uses
-    # literal values: "listen 8000;" must ALWAYS be present in the
+    # literal values: "listen 80;" must ALWAYS be present in the
     # rendered nginx.conf. A previous conditional/variable-only
     # version could render without the listener, after which the role
-    # timed out waiting for 127.0.0.1:8000 while :6003 kept working.
+    # timed out waiting for the port while :6003 kept working.
     # The Jenkins pipeline publishes the Admin UI into html/knowledge-hub.
+    # This matches the nginx.conf in production use on 10.10.6.116
+    # (verified running as intended).
     # ------------------------------------------------------------------
     server {
-        listen       8000;
-        server_name  localhost _;
+        listen       80;
+        server_name  copper.qajarvis.com;
 
         root   html/knowledge-hub;
         index  index.html;
 
-        # Angular SPA fallback - all unknown paths return the app shell,
-        # so http://localhost:8000/ opens the Knowledge Hub Admin UI
+        # Angular SPA fallback - all unknown paths return the app shell
         location / {
             try_files $uri $uri/ /index.html;
         }
@@ -222,16 +223,46 @@ http {
             proxy_read_timeout 300s;
         }
 
-        # Knowledge Hub MCP endpoints incl. the SSE stream.
-        # proxy_buffering MUST stay off and HTTP/1.1 keep-alive on,
-        # otherwise /mcp/stream events are buffered and never flush.
-        location /mcp/ {
+        location /admin/ {
             proxy_pass   http://127.0.0.1:8037;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # MCP endpoint without trailing slash
+        location = /mcp {
+            proxy_pass   http://127.0.0.1:8037;
+
             proxy_http_version 1.1;
             proxy_set_header Host              $host;
             proxy_set_header X-Real-IP         $remote_addr;
             proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-QASIP-Tenant    $http_x_qasip_tenant;
             proxy_set_header Connection        "";
+
+            proxy_buffering  off;
+            proxy_cache      off;
+            proxy_read_timeout 86400s;
+            proxy_send_timeout 86400s;
+        }
+
+        # MCP endpoint with trailing slash and subpaths.
+        # proxy_buffering MUST stay off and HTTP/1.1 keep-alive on,
+        # otherwise MCP/SSE events are buffered and never flush.
+        location /mcp/ {
+            proxy_pass   http://127.0.0.1:8037;
+
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-QASIP-Tenant    $http_x_qasip_tenant;
+            proxy_set_header Connection        "";
+
             proxy_buffering  off;
             proxy_cache      off;
             proxy_read_timeout 86400s;
@@ -239,6 +270,20 @@ http {
         }
 
         client_max_body_size 50M;
+    }
+
+    # ------------------------------------------------------------------
+    # Knowledge Hub MCP reverse proxy - port 8040
+    #   Client : http://10.10.6.116:8040/mcp
+    #   Backend: http://127.0.0.1:8037
+    # ------------------------------------------------------------------
+    server {
+        listen       8040;
+
+        location / {
+            proxy_pass   http://127.0.0.1:8037;
+            proxy_set_header Host 127.0.0.1:8037;
+        }
     }
 
     # HTTPS server
