@@ -29,6 +29,7 @@
  *                     curl http://localhost:8037/mcp/tools
  * ============================================================================
  */
+
 pipeline {
     agent {
         label params.PROJECT_TARGET_MACHINE.toLowerCase()
@@ -52,8 +53,6 @@ pipeline {
     }
 
     environment {
-        // Keys follow the common deploy-pipeline header, prefixed with
-        // KNOWLEDGE_HUB_ so this job's values never clash with other apps.
         KNOWLEDGE_HUB_PROJECT_NAME         = "${params.PROJECT_TARGET_MACHINE.toLowerCase().split('-')[0]}"
         KNOWLEDGE_HUB_NEXUS_URL            = 'http://10.10.5.220:8081'
         KNOWLEDGE_HUB_NEXUS_REPO           = 'atms-modules'
@@ -68,10 +67,7 @@ pipeline {
         KNOWLEDGE_HUB_AI_APP_DIR           = 'D:\\QASIP\\Apps\\python-ai-service\\test_script_generator'
         KNOWLEDGE_HUB_NODE_DEPLOY_DIR      = 'D:\\QASIP\\Apps\\node-service'
         KNOWLEDGE_HUB_ANSIBLE_OS           = "windows"
-        // Python path is fixed to the side-by-side Python 3.12 installed by
-        // Ansible (plain `python` on these machines is still Python 3.11)
 
-        // ---- Knowledge Hub specific (code is already on the machine) ----
         KNOWLEDGE_HUB_CODE_DIR     = 'D:\\copper-code\\AI-Python'
         KNOWLEDGE_HUB_BACKEND_DIR  = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub"
         KNOWLEDGE_HUB_FRONTEND_DIR = "${KNOWLEDGE_HUB_CODE_DIR}\\Knowledge_Hub_Admin"
@@ -82,21 +78,15 @@ pipeline {
         KNOWLEDGE_HUB_LOG_DIR      = "${KNOWLEDGE_HUB_BACKEND_DIR}\\logs"
         KNOWLEDGE_HUB_ADMIN_UI_PATH = 'knowledge-hub'
 
-        // ---- Hostname (derived, not a parameter) ----
-        // The infra pipeline's hosts-entry role already added
-        // "qajarvis.com" and "<instance>.qajarvis.com" to the Windows hosts
-        // file, so the hostname is filled here during pipeline execution.
+
         KNOWLEDGE_HUB_HOSTNAME = "${KNOWLEDGE_HUB_PROJECT_NAME}.qajarvis.com"
 
-        // ---- QASIP_HUB_* backend application environment ----
-        // (These names are read by the Knowledge Hub app itself, so they
-        //  keep their QASIP_HUB_ names; secrets come from Jenkins
-        //  credentials / the generated secret key - never from git.)
+
         QASIP_HUB_HOST                 = '0.0.0.0'
         QASIP_HUB_PORT                 = '8037'
         QASIP_HUB_RELOAD               = 'false'
-        QASIP_HUB_CORS_ORIGINS         = "https://${KNOWLEDGE_HUB_HOSTNAME}"
-        QASIP_HUB_PUBLIC_URL           = "https://${KNOWLEDGE_HUB_HOSTNAME}"
+        QASIP_HUB_CORS_ORIGINS         = "http://${KNOWLEDGE_HUB_HOSTNAME}"
+        QASIP_HUB_PUBLIC_URL           = "http://${KNOWLEDGE_HUB_HOSTNAME}"
         QASIP_HUB_LLM_PROVIDER         = 'openai'
         QASIP_HUB_OPENAI_MODEL         = ''
         QASIP_HUB_AZURE_OPENAI_ENDPOINT    = ''
@@ -111,7 +101,7 @@ pipeline {
         QASIP_HUB_AUDIT_ENABLED        = 'true'
 
         // Frontend build variable (baked into the JS bundle at build time)
-        VITE_HUB_API_URL = "https://${KNOWLEDGE_HUB_HOSTNAME}"
+        VITE_HUB_API_URL = "http://${KNOWLEDGE_HUB_HOSTNAME}"
     }
 
     stages {
@@ -467,6 +457,7 @@ pipeline {
                         echo Applying database migrations (alembic)
                         echo ========================================
 
+                        setlocal DisableDelayedExpansion
                         set "QASIP_HUB_DATABASE_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
                         set "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%"
 
@@ -555,54 +546,27 @@ pipeline {
 
                         echo Setting QASIP_HUB_* environment for the service...
 
+                        rem Disable delayed expansion while expanding the DB password so a ! is preserved.
+                        setlocal DisableDelayedExpansion
                         set "KH_DB_URL=postgresql://%KH_DB_USER%:%KH_DB_PASSWORD%@localhost:5433/qasip_hub"
+
+                        rem Build one KEY=VALUE argument for the selected LLM provider.
                         if "${env.QASIP_HUB_LLM_PROVIDER}" == "azure_openai" (
                             set "KH_LLM_ENV=QASIP_HUB_AZURE_OPENAI_API_KEY=%KH_LLM_API_KEY_RESOLVED%"
                         ) else (
                             set "KH_LLM_ENV=QASIP_HUB_OPENAI_API_KEY=%KH_LLM_API_KEY_RESOLVED%"
                         )
 
-                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppEnvironmentExtra ^
-                            "QASIP_HUB_DATABASE_URL=!KH_DB_URL!" ^
-                            "QASIP_HUB_HOST=${env.QASIP_HUB_HOST}" ^
-                            "QASIP_HUB_PORT=${env.QASIP_HUB_PORT}" ^
-                            "QASIP_HUB_RELOAD=${env.QASIP_HUB_RELOAD}" ^
-                            "QASIP_HUB_CORS_ORIGINS=${env.QASIP_HUB_CORS_ORIGINS}" ^
-                            "QASIP_HUB_PUBLIC_URL=${env.QASIP_HUB_PUBLIC_URL}" ^
-                            "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%" ^
-                            "QASIP_HUB_LLM_PROVIDER=${env.QASIP_HUB_LLM_PROVIDER}" ^
-                            "!KH_LLM_ENV!" ^
-                            "QASIP_HUB_OPENAI_MODEL=${env.QASIP_HUB_OPENAI_MODEL}" ^
-                            "QASIP_HUB_AZURE_OPENAI_ENDPOINT=${env.QASIP_HUB_AZURE_OPENAI_ENDPOINT}" ^
-                            "QASIP_HUB_AZURE_OPENAI_API_VERSION=${env.QASIP_HUB_AZURE_OPENAI_API_VERSION}" ^
-                            "QASIP_HUB_AZURE_OPENAI_DEPLOYMENT=${env.QASIP_HUB_AZURE_OPENAI_DEPLOYMENT}" ^
-                            "QASIP_HUB_EMBEDDING_PROVIDER=${env.QASIP_HUB_EMBEDDING_PROVIDER}" ^
-                            "QASIP_HUB_LOCAL_EMBEDDING_MODEL=${env.QASIP_HUB_LOCAL_EMBEDDING_MODEL}" ^
-                            "QASIP_HUB_VECTOR_BACKEND=${env.QASIP_HUB_VECTOR_BACKEND}" ^
-                            "QASIP_HUB_QDRANT_URL=${env.QASIP_HUB_QDRANT_URL}" ^
-                            "QASIP_HUB_QDRANT_API_KEY=%QASIP_HUB_QDRANT_API_KEY_RESOLVED%" ^
-                            "QASIP_HUB_QDRANT_COLLECTION=${env.QASIP_HUB_QDRANT_COLLECTION}" ^
-                            "QASIP_HUB_LOG_LEVEL=${env.QASIP_HUB_LOG_LEVEL}" ^
-                            "QASIP_HUB_AUDIT_ENABLED=${env.QASIP_HUB_AUDIT_ENABLED}"
-
-                        if !ERRORLEVEL! NEQ 0 (
-                            echo ERROR: Failed to set service environment
+                        nssm set "${env.KNOWLEDGE_HUB_SERVICE_NAME}" AppEnvironmentExtra "QASIP_HUB_DATABASE_URL=%KH_DB_URL%" "QASIP_HUB_HOST=${env.QASIP_HUB_HOST}" "QASIP_HUB_PORT=${env.QASIP_HUB_PORT}" "QASIP_HUB_RELOAD=${env.QASIP_HUB_RELOAD}" "QASIP_HUB_CORS_ORIGINS=${env.QASIP_HUB_CORS_ORIGINS}" "QASIP_HUB_PUBLIC_URL=${env.QASIP_HUB_PUBLIC_URL}" "QASIP_HUB_SECRET_KEY=%GENERATED_SECRET_KEY%" "QASIP_HUB_LLM_PROVIDER=${env.QASIP_HUB_LLM_PROVIDER}" "%KH_LLM_ENV%" "QASIP_HUB_OPENAI_MODEL=${env.QASIP_HUB_OPENAI_MODEL}" "QASIP_HUB_AZURE_OPENAI_ENDPOINT=${env.QASIP_HUB_AZURE_OPENAI_ENDPOINT}" "QASIP_HUB_AZURE_OPENAI_API_VERSION=${env.QASIP_HUB_AZURE_OPENAI_API_VERSION}" "QASIP_HUB_AZURE_OPENAI_DEPLOYMENT=${env.QASIP_HUB_AZURE_OPENAI_DEPLOYMENT}" "QASIP_HUB_EMBEDDING_PROVIDER=${env.QASIP_HUB_EMBEDDING_PROVIDER}" "QASIP_HUB_LOCAL_EMBEDDING_MODEL=${env.QASIP_HUB_LOCAL_EMBEDDING_MODEL}" "QASIP_HUB_VECTOR_BACKEND=${env.QASIP_HUB_VECTOR_BACKEND}" "QASIP_HUB_QDRANT_URL=${env.QASIP_HUB_QDRANT_URL}" "QASIP_HUB_QDRANT_API_KEY=%QASIP_HUB_QDRANT_API_KEY_RESOLVED%" "QASIP_HUB_QDRANT_COLLECTION=${env.QASIP_HUB_QDRANT_COLLECTION}" "QASIP_HUB_LOG_LEVEL=${env.QASIP_HUB_LOG_LEVEL}" "QASIP_HUB_AUDIT_ENABLED=${env.QASIP_HUB_AUDIT_ENABLED}"
+                        if errorlevel 1 (
+                            echo ERROR: NSSM failed to set AppEnvironmentExtra
                             exit /b 1
                         )
 
-                        rem Verify what NSSM actually stored, with an inline
-                        rem PowerShell command (no script file - a generated
-                        rem kh_verify_env.ps1 was missing on the target when
-                        rem this step ran, which failed the stage before any
-                        rem check could run). It prints only the host part
-                        rem of the stored DATABASE_URL (everything from the
-                        rem last '@', password never printed), checks
-                        rem QASIP_HUB_SECRET_KEY is present, and fails
-                        rem (exit 1) if the URL is missing or does not use
-                        rem localhost:5433/qasip_hub.
-                        powershell -NoProfile -ExecutionPolicy Bypass -Command "\$lines = @(nssm get ${env.KNOWLEDGE_HUB_SERVICE_NAME} AppEnvironmentExtra); if (\$lines.Count -eq 0) { Write-Host 'ERROR: Could not read the service environment via nssm get'; exit 1 }; \$dbLine = \$null; \$secretFound = \$false; foreach (\$line in \$lines) { if (\$line -like 'QASIP_HUB_DATABASE_URL=*') { \$dbLine = \$line }; if (\$line -like 'QASIP_HUB_SECRET_KEY=*') { \$secretFound = \$true } }; if (-not \$dbLine) { \$joined = [string]::Join(' ', \$lines); \$m2 = [regex]::Match(\$joined, 'QASIP_HUB_DATABASE_URL=(\\S+)'); if (\$m2.Success) { \$dbLine = 'QASIP_HUB_DATABASE_URL=' + \$m2.Groups[1].Value } }; if (-not \$dbLine) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is MISSING from the service environment - /health will report db unavailable'; exit 1 }; \$url = \$dbLine.Substring('QASIP_HUB_DATABASE_URL='.Length); \$atPos = \$url.LastIndexOf('@'); \$hostPart = ''; if (\$atPos -ge 0) { \$hostPart = \$url.Substring(\$atPos) }; Write-Host ('Stored service DATABASE_URL host part: ' + \$hostPart); if (\$hostPart -notlike '@localhost:5433/qasip_hub*') { Write-Host ('ERROR: Service DATABASE_URL does NOT use localhost:5433/qasip_hub - stored host part is: ' + \$hostPart); exit 1 }; if (-not \$secretFound) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is MISSING from the service environment'; exit 1 }; Write-Host '[OK] Service DATABASE_URL verified: present and uses localhost:5433/qasip_hub (only host part printed, password never printed).'; Write-Host '[OK] Service QASIP_HUB_SECRET_KEY is present (value not printed).'"
-                        if !ERRORLEVEL! NEQ 0 (
-                            echo ERROR: Service environment verification FAILED - see the stored DATABASE_URL host part printed above.
+                        rem Verify the stored database URL without printing its password.
+                        powershell -NoProfile -ExecutionPolicy Bypass -Command "\$lines = @(nssm get ${env.KNOWLEDGE_HUB_SERVICE_NAME} AppEnvironmentExtra); if (\$lines.Count -eq 0) { Write-Host 'ERROR: Could not read service environment'; exit 1 }; \$dbLine = \$null; \$secretFound = \$false; foreach (\$line in \$lines) { if (\$line -like 'QASIP_HUB_DATABASE_URL=*') { \$dbLine = \$line }; if (\$line -like 'QASIP_HUB_SECRET_KEY=*') { \$secretFound = \$true } }; if (-not \$dbLine) { \$joined = [string]::Join(' ', \$lines); \$m = [regex]::Match(\$joined, 'QASIP_HUB_DATABASE_URL=(\\S+)'); if (\$m.Success) { \$dbLine = 'QASIP_HUB_DATABASE_URL=' + \$m.Groups[1].Value } }; if (-not \$dbLine) { Write-Host 'ERROR: QASIP_HUB_DATABASE_URL is missing'; exit 1 }; \$url = \$dbLine.Substring('QASIP_HUB_DATABASE_URL='.Length); \$at = \$url.LastIndexOf('@'); \$hostPart = ''; if (\$at -ge 0) { \$hostPart = \$url.Substring(\$at) }; Write-Host ('Stored DATABASE_URL host part: ' + \$hostPart); if (\$hostPart -notlike '@localhost:5433/qasip_hub*') { Write-Host 'ERROR: DATABASE_URL must use localhost:5433/qasip_hub'; exit 1 }; if (-not \$secretFound) { Write-Host 'ERROR: QASIP_HUB_SECRET_KEY is missing'; exit 1 }; Write-Host '[OK] Database URL structure and secret-key presence verified.'"
+                        if errorlevel 1 (
+                            echo ERROR: Service environment verification FAILED
                             exit /b 1
                         )
 
