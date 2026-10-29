@@ -72,7 +72,7 @@
 # processes are gone (a master can linger while workers drain, or one
 # was started outside the service). A leftover master keeps serving
 # :6003 with its OLD config and prevents the new master from binding,
-# so the run then times out waiting for :8000 while :6003 "works".
+# so the run then times out waiting for :80 while :6003 "works".
 # This role owns Nginx on the host, so clear any leftovers.
 - name: Ensure no leftover nginx.exe processes remain
   win_shell: |
@@ -96,7 +96,7 @@
   notify: restart nginx
 
 # Fail fast HERE if the template rendered a bad config, instead of
-# discovering it later as "connection refused" on 6003/8000.
+# discovering it later as "connection refused" on 6003/80/8040.
 # NOTE (Windows): judge the syntax verdict in stderr, NOT the exit code.
 # `nginx -t` also tries to create the shared-memory object
 # "nginx_shared_zone"; while an nginx master (ATMS-Nginx, running as
@@ -104,7 +104,7 @@
 # gets "CreateFileMapping(...) failed (5: Access is denied)", making
 # nginx exit 1 even when it just printed "syntax is ok". Failing on
 # rc alone aborted provisioning before the service was (re)started,
-# which is why nothing ever listened on :8000.
+# which is why nothing ever listened on :80.
 - name: Validate rendered nginx.conf (nginx -t)
   win_command: "{{ nginx_root_path }}\\nginx.exe -t -p {{ nginx_root_path }}"
   register: nginx_config_test
@@ -125,36 +125,41 @@
     - nginx_config_test.rc != 0
     - "'syntax is ok' in (nginx_config_test.stderr | default(''))"
 
-# The Knowledge Hub :8000 server block serves from this directory
+# The Knowledge Hub :80 server block serves from this directory
 # (Jenkinsfile-build-knowledgehub-windows publishes the Admin UI dist
 # into it). Create it up front so the server root always exists and
-# http://localhost:8000/ answers from the first provisioning run
+# http://localhost/ answers from the first provisioning run
 # (403 until the UI is published, instead of nginx erroring on a
 # missing root).
-- name: Confirm deployed nginx.conf contains the Knowledge Hub :8000 listener
+- name: Confirm deployed nginx.conf contains the Knowledge Hub listeners (:80 and :8040)
   win_shell: |
     $conf = "{{ nginx_root_path }}\\conf\\nginx.conf"
-    if (-not (Select-String -Path $conf -Pattern 'listen\s+8000;' -Quiet)) {
-      Write-Host "ERROR: 'listen 8000;' NOT found in $conf - the Knowledge Hub UI server block did not deploy"
+    if (-not (Select-String -Path $conf -Pattern 'listen\s+80;' -Quiet)) {
+      Write-Host "ERROR: 'listen 80;' NOT found in $conf - the Knowledge Hub UI server block did not deploy"
       exit 1
     }
-    Write-Host "OK: nginx.conf contains 'listen 8000;' (Knowledge Hub Admin UI)"
+    Write-Host "OK: nginx.conf contains 'listen 80;' (Knowledge Hub Admin UI)"
+    if (-not (Select-String -Path $conf -Pattern 'listen\s+8040;' -Quiet)) {
+      Write-Host "ERROR: 'listen 8040;' NOT found in $conf - the Knowledge Hub MCP reverse proxy block did not deploy"
+      exit 1
+    }
+    Write-Host "OK: nginx.conf contains 'listen 8040;' (Knowledge Hub MCP reverse proxy)"
     if (-not (Select-String -Path $conf -Pattern 'root\s+html/knowledge-hub;' -Quiet)) {
       Write-Host "ERROR: Knowledge Hub UI root 'html/knowledge-hub' NOT found in $conf"
       exit 1
     }
-    Write-Host "OK: nginx.conf serves the published Admin UI from html/knowledge-hub on :8000"
+    Write-Host "OK: nginx.conf serves the published Admin UI from html/knowledge-hub on :80"
     if (-not (Select-String -Path $conf -Pattern 'proxy_pass\s+http://127\.0\.0\.1:8037;' -Quiet)) {
       Write-Host "ERROR: Knowledge Hub backend proxy '127.0.0.1:8037' NOT found in $conf"
       exit 1
     }
-    Write-Host "OK: nginx.conf proxies /health and /mcp/ to the backend on 127.0.0.1:8037"
+    Write-Host "OK: nginx.conf proxies /health, /admin/, /mcp and /mcp/ to the backend on 127.0.0.1:8037"
     exit 0
   changed_when: false
   when: knowledge_hub_enabled | bool
 
 # The backend (Knowledge_Hub, :8037) and the Admin UI (Knowledge_Hub_Admin,
-# :8000) are separate applications in separate directories. The code is
+# :80) are separate applications in separate directories. The code is
 # already on the machine (Ansible does not create it) - only report if a
 # directory is missing; the Knowledge Hub pipeline fails clearly later if
 # the code really is absent.
@@ -172,7 +177,7 @@
   debug:
     msg: >-
       WARNING: {{ item.item }} was not found on this machine. The
-      Knowledge Hub backend (:8037) and Admin UI (:8000) live in separate
+      Knowledge Hub backend (:8037) and Admin UI (:80) live in separate
       directories - deploy the code there before running
       Jenkinsfile-build-knowledgehub-windows.
   loop: "{{ knowledge_hub_code_dirs.results | default([]) }}"
@@ -230,7 +235,7 @@
 # Do NOT leave the config restart to the handler alone: handlers only
 # flush at the end of a FULLY successful play, and many roles run after
 # nginx in windows.yml. If a later role fails, the handler never fires
-# and the running Nginx keeps the OLD config (e.g. no :8000 server).
+# and the running Nginx keeps the OLD config (e.g. no :80 server).
 # Flushing here applies a changed nginx.conf immediately.
 - name: Apply pending Nginx restart now (flush handlers)
   meta: flush_handlers
@@ -279,7 +284,7 @@
   ignore_errors: true
   when: knowledge_hub_enabled | bool
 
-# If :8000 never binds, the reason is in the Nginx error log (bind
+# If :80 never binds, the reason is in the Nginx error log (bind
 # failure, another process on the port, bad root path...). Show it in
 # the provisioning log instead of leaving only "timeout while waiting".
 - name: Show Nginx error log if the UI listener did not start
@@ -307,10 +312,17 @@
     - knowledge_hub_enabled | bool
     - knowledge_hub_ui_wait is failed
 
+- name: Wait for Knowledge Hub MCP proxy listener (port {{ knowledge_hub_mcp_listen_port }})
+  win_wait_for:
+    port: "{{ knowledge_hub_mcp_listen_port }}"
+    timeout: 30
+    delay: 3
+  when: knowledge_hub_enabled | bool
+
 # NOTE: no HTTP 200 check here on purpose - the admin UI files are only
 # published later by Jenkinsfile-build-knowledgehub-windows, so before
 # the first deploy this server correctly answers 403/404. What MUST be
-# true right after provisioning: http://localhost:8000/ gets an HTTP
+# true right after provisioning: http://localhost/ gets an HTTP
 # answer at all (any status), instead of "connection refused".
 - name: Verify Knowledge Hub UI answers on localhost:{{ knowledge_hub_listen_port }}
   win_shell: |
